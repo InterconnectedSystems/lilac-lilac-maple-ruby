@@ -57,4 +57,5 @@ scripts/sign-out-plan.mjs
 scripts/sign-out-plan.test.mjs
 scripts/write-atomic.mjs
 scripts/write-atomic.test.mjs
+scripts/with-app-env.test.mjs
 screenshots/.gitkeep
