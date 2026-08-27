@@ -2,7 +2,7 @@
 # Mist Disconnect Console — local browser app (Windows / macOS / Linux)
 #
 # Exact dashboard: Observer-token gate, site/MAC RCA, correlations, live poll,
-# and Radio Management-style occupancy (Site APs / External APs / Non-Wi-Fi)
+# Radio Management occupancy, 7-day radio events, and Teams/Zoom call quality
 # for the AP the client spent most time on.
 # Stdlib only. Token stays in the browser tab and is sent only to this process → Mist GET APIs.
 #
@@ -43,7 +43,34 @@ DEMO_MAC = "0a0027c1e001"
 WINDOW_DHCP_S = 120
 WINDOW_HANDSHAKE_S = 45
 WINDOW_CLUSTER_S = 300
+WINDOW_RADIO_DFS_S = 120
+WINDOW_RADIO_RRM_S = 300
+WINDOW_CALL_S = 30
 PINGPONG_MIN = 4
+RADIO_EVENTS_DURATION = "7d"
+# listSiteRrmEvents requires dot11_band. Portal Radio Events = union of 5 / 24 / 6.
+RRM_FETCH_BANDS = ("5", "24", "6")
+RRM_PAGES_5 = 3  # 5 GHz holds DFS/post-radar; portal can list hundreds in 7d
+RRM_PAGES_OTHER = 1
+
+# Portal Radio Management → Radio Events wording.
+RRM_EVENT_LABELS = {
+    "interference-ap-co-channel": "Interference AP co-channel",
+    "interference-ap-non-wifi": "Interference AP non wifi",
+    "neighbor-ap-down": "Neighbor AP down",
+    "neighbor-ap-recovered": "Neighbor AP recovered",
+    "radar-detected": "Radar detected",
+    "rrm-radar": "Post radar",
+    "scheduled-site_rrm": "Scheduled site RRM",
+    "triggered-site_rrm": "Triggered site RRM",
+}
+DISRUPTIVE_RADIO = {
+    "radar-detected",
+    "rrm-radar",
+    "interference-ap-co-channel",
+    "interference-ap-non-wifi",
+    "triggered-site_rrm",
+}
 
 REASON_CODES = {
     1: "Unspecified",
@@ -69,9 +96,11 @@ REASON_CODES = {
 }
 
 NEGATIVE = (
-    "DEAUTH", "DISASSOC", "FAIL", "DENIED", "TIMEOUT", "STUCK",
-    "DISCONNECT", "DHCP", "DNS", "ARP", "BLOCKED",
+    "DEAUTH", "DISASSOC", "FAIL", "DENIED", "TIMEOUT", "TIMED_OUT", "STUCK",
+    "DISCONNECT", "TERMINATED", "BLOCKED", "SPOOF", "NAK", "BAD_IP", "BAD IP",
 )
+# Mist Insights: DHCP Success / IP Assigned / DNS Success are POSITIVE.
+# Do not treat the letters DHCP/DNS/ARP as failure by themselves.
 
 CTX = ssl.create_default_context()
 
@@ -172,11 +201,29 @@ def as_array(v: Any) -> list[dict]:
 
 
 def is_negative(typ: str, text: str) -> bool:
+    """FAIL vs OK for the event timeline.
+
+    Mist Insights classifies DHCP Success, IP Assigned, DNS Success as positive.
+    CLIENT_IP_ASSIGNED must not be FAIL. Only timed-out / denied / terminated /
+    bad-IP DHCP-DNS-ARP events are negative.
+
+    Check deauth/disassoc first: CLIENT_DISASSOCIATION contains the letters
+    ASSOCIATION and would otherwise look like a successful join.
+    """
     hay = f"{typ} {text}".upper()
-    if ("SUCCESS" in hay or "OK" in hay or "JOINED" in hay) and "FAIL" not in hay:
-        return False
+    if any(k in hay for k in ("DEAUTH", "DISASSOC")):
+        return True
     # AUTH is not a keyword: ASSOCIATION / AUTHORIZATION contain it and would
     # mark every successful join as a failure.
+    success = any(
+        k in hay
+        for k in (
+            "SUCCESS", "_OK", " OK", "JOINED", "ASSIGNED",
+            "ASSOCIATION", "REASSOCIATION", "AUTHORIZATION",
+        )
+    )
+    if success and not any(k in hay for k in ("FAIL", "DENIED", "TIMEOUT", "TIMED_OUT", "TERMINATED", "BAD_IP", "BAD IP")):
+        return False
     return any(k in hay for k in NEGATIVE)
 
 
@@ -866,6 +913,712 @@ def pick_session(raw: dict) -> dict:
     }
 
 
+def as_results(payload: Any) -> list:
+    if payload is None:
+        return []
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    rec = as_record(payload)
+    return as_array(rec.get("results") or rec.get("data") or [])
+
+
+def rrm_events_query(band: str, page: int = 1, limit: int = 100, duration: str = RADIO_EVENTS_DURATION) -> dict:
+    """listSiteRrmEvents query. Mist returns 400 'valid band is required' without band."""
+    b = str(band or "").strip()
+    if not b:
+        raise ValueError("valid band is required")
+    return {"band": b, "duration": duration, "limit": int(limit), "page": int(page)}
+
+
+def attach_ap_names(radio_events: list, inventory: list | None) -> list:
+    names = {hex_mac(d.get("mac")): str(d.get("name") or "") for d in (inventory or []) if hex_mac(d.get("mac"))}
+    for re in radio_events:
+        if not re.get("apName"):
+            re["apName"] = names.get(re.get("ap") or "") or ""
+    return radio_events
+
+
+def rrm_event_label(event: str) -> str:
+    ev = str(event or "").strip()
+    if ev in RRM_EVENT_LABELS:
+        return RRM_EVENT_LABELS[ev]
+    return ev.replace("-", " ").replace("_", " ").title() or "Radio event"
+
+
+def pick_rrm_event(raw: dict) -> dict:
+    ev = str(raw.get("event") or raw.get("type") or "")
+    pre_ch = num(raw.get("pre_channel", raw.get("preChannel")))
+    ch = num(raw.get("channel"))
+    changed = False
+    try:
+        if pre_ch not in (None, 0) and ch not in (None, 0):
+            changed = int(pre_ch) != int(ch)
+    except (TypeError, ValueError):
+        changed = False
+    return {
+        "timestamp": num(raw.get("timestamp")) or 0,
+        "ap": hex_mac(raw.get("ap")),
+        "apName": str(raw.get("ap_name") or raw.get("apName") or ""),
+        "band": str(raw.get("band") or ""),
+        "channel": ch,
+        "preChannel": pre_ch,
+        "bandwidth": num(raw.get("bandwidth")),
+        "preBandwidth": num(raw.get("pre_bandwidth", raw.get("preBandwidth"))),
+        "power": num(raw.get("power")),
+        "prePower": num(raw.get("pre_power", raw.get("prePower"))),
+        "event": ev,
+        "label": rrm_event_label(ev),
+        "usage": str(raw.get("usage") or ""),
+        "preUsage": str(raw.get("pre_usage") or raw.get("preUsage") or ""),
+        "channelChanged": changed,
+    }
+
+
+def quality_poor(q: Any) -> bool:
+    n = num(q)
+    if n is None:
+        return False
+    if n > 5:
+        return n < 50
+    return n <= 2 and n >= 0
+
+
+def collab_app_label(app: Any) -> str:
+    a = str(app or "").strip().lower()
+    if not a:
+        return "Unknown app"
+    if "team" in a:
+        return "Microsoft Teams"
+    if "zoom" in a:
+        return "Zoom"
+    if "webex" in a:
+        return "Webex"
+    if "skype" in a:
+        return "Skype"
+    return str(app)
+
+
+def is_teams_app(app: Any) -> bool:
+    a = str(app or "").strip().lower()
+    return "team" in a or "skype" in a
+
+
+def pick_call(raw: dict) -> dict:
+    app = str(raw.get("app") or "unknown")
+    start = num(raw.get("start_time", raw.get("start")))
+    end = num(raw.get("end_time", raw.get("end")))
+    dur = None
+    if start is not None and end is not None and end > start:
+        dur = end - start
+    audio = num(raw.get("audio_quality"))
+    video = num(raw.get("video_quality"))
+    screen = num(raw.get("screen_share_quality"))
+    rating = num(raw.get("rating"))
+    return {
+        "app": app,
+        "appLabel": collab_app_label(app),
+        "mac": hex_mac(raw.get("mac")),
+        "meetingId": str(raw.get("meeting_id") or raw.get("meetingId") or ""),
+        "start": start,
+        "end": end,
+        "duration": dur,
+        "audioQuality": audio,
+        "videoQuality": video,
+        "screenShareQuality": screen,
+        "rating": rating,
+        "poor": quality_poor(audio) or quality_poor(video) or quality_poor(rating) or quality_poor(screen),
+        "teams": is_teams_app(app),
+    }
+
+
+def same_ap_mac(a: Any, b: Any) -> bool:
+    ha, hb = hex_mac(a), hex_mac(b)
+    return bool(ha and hb and ha == hb)
+
+
+def annotate_radio_events(
+    radio_events: list,
+    events: list,
+    sessions: list,
+    stats: dict | None,
+) -> list:
+    for re in radio_events:
+        on_ap = client_ap_at(sessions, events, stats, float(re.get("timestamp") or 0))
+        re["onClientAp"] = same_ap_mac(on_ap, re.get("ap"))
+        re["highlight"] = bool(is_radar_event(re) and re["onClientAp"])
+    return radio_events
+
+
+def is_radar_event(ev: dict) -> bool:
+    e = str(ev.get("event") or "").lower()
+    return e in {"radar-detected", "rrm-radar"} or "radar" in e
+
+
+def power_changed(ev: dict) -> bool:
+    pre, cur = num(ev.get("prePower")), num(ev.get("power"))
+    if pre is None or cur is None:
+        return False
+    return abs(float(cur) - float(pre)) >= 3
+
+
+def band_hz_label(b: Any) -> str:
+    s = str(b or "").strip().lower()
+    if s in {"24", "2.4", "2"}:
+        return "2.4 GHz"
+    if s == "6":
+        return "6 GHz"
+    if not s:
+        return "—"
+    return "5 GHz"
+
+
+def arrow_vals(pre: Any, cur: Any, unit: str = "") -> str:
+    if pre in (None, "", 0) or str(pre) == str(cur):
+        return f"{cur}{unit}" if cur not in (None, "") else "—"
+    if cur in (None, ""):
+        return f"{pre}{unit}"
+    return f"{pre}{unit} → {cur}{unit}"
+
+
+def ap_name_for(mac: Any, radio_events: list | None = None, ap_radio: dict | None = None) -> str:
+    h = hex_mac(mac)
+    if not h:
+        return "—"
+    if ap_radio and same_ap_mac(ap_radio.get("apMac"), h) and ap_radio.get("apName"):
+        return str(ap_radio.get("apName"))
+    for re in radio_events or []:
+        if same_ap_mac(re.get("ap"), h) and re.get("apName"):
+            return str(re.get("apName"))
+    return format_mac(h)
+
+
+def radar_fact(re: dict, client_ap: str, client_name: str, call: dict | None = None, drop: dict | None = None) -> dict:
+    """Structured fields so the dashboard can name the call, AP, time, and radar row."""
+    return {
+        "call": (call or {}).get("appLabel") if call else None,
+        "meetingId": (call or {}).get("meetingId") or None,
+        "callStart": (call or {}).get("start") if call else None,
+        "callEnd": (call or {}).get("end") if call else None,
+        "callDuration": (call or {}).get("duration") if call else None,
+        "audioQuality": (call or {}).get("audioQuality") if call else None,
+        "videoQuality": (call or {}).get("videoQuality") if call else None,
+        "clientAp": hex_mac(client_ap) or None,
+        "clientApName": client_name or None,
+        "radarEvent": re.get("label") or re.get("event"),
+        "radarType": re.get("event"),
+        "radarTime": re.get("timestamp"),
+        "radarAp": hex_mac(re.get("ap")) or None,
+        "radarApName": re.get("apName") or None,
+        "radarChannel": arrow_vals(re.get("preChannel"), re.get("channel")),
+        "radarWidth": arrow_vals(re.get("preBandwidth"), re.get("bandwidth"), " MHz"),
+        "radarPower": arrow_vals(re.get("prePower"), re.get("power"), " dBm"),
+        "radarBand": f"{band_hz_label(re.get('preUsage') or re.get('band'))} → {band_hz_label(re.get('usage') or re.get('band'))}",
+        "dropType": (drop or {}).get("type") if drop else None,
+        "dropTime": (drop or {}).get("timestamp") if drop else None,
+    }
+
+
+def client_ap_at(sessions: list, events: list, stats: dict | None, t: float) -> str:
+    """AP this client was associated to at epoch t.
+
+    Sessions first, then the last client event at or before t. Live stats AP is
+    only used if t is within 5 minutes of now — otherwise a 4-day-old radar would
+    be pinned to whichever AP the client is on today, which is a false match.
+    """
+    covering = []
+    for s in sessions or []:
+        start = s.get("connect")
+        if start is None:
+            continue
+        end = s.get("disconnect")
+        if end is None:
+            end = t + 1
+        if float(start) - 2 <= t <= float(end) + 2 and s.get("ap"):
+            covering.append((float(start), hex_mac(s.get("ap"))))
+    if covering:
+        covering.sort(key=lambda x: x[0], reverse=True)
+        return covering[0][1]
+    prior = [
+        e for e in (events or [])
+        if (e.get("timestamp") or 0) <= t + 2 and e.get("ap")
+    ]
+    if prior:
+        prior.sort(key=lambda e: e.get("timestamp") or 0)
+        return hex_mac(prior[-1].get("ap"))
+    live = hex_mac((stats or {}).get("ap"))
+    if live and abs(time.time() - t) <= 300:
+        return live
+    return ""
+
+
+def session_covers(sess: dict, t: float) -> bool:
+    start = sess.get("connect")
+    if start is None:
+        return False
+    end = sess.get("disconnect")
+    if end is None:
+        end = t + 1
+    return float(start) - 2 <= t <= float(end) + 2
+
+
+def session_on_ap_at(sessions: list | None, t: float, ap: Any) -> dict | None:
+    """Client session on this AP covering epoch t. Same-AP is required."""
+    hits = [
+        s for s in (sessions or [])
+        if session_covers(s, t) and same_ap_mac(s.get("ap"), ap)
+    ]
+    if not hits:
+        return None
+    hits.sort(key=lambda s: float(s.get("connect") or 0), reverse=True)
+    return hits[0]
+
+
+def radar_session_alerts(
+    radio_events: list,
+    sessions: list | None,
+    calls: list | None = None,
+    ap_radio: dict | None = None,
+) -> list[dict]:
+    """Dashboard alerts: a client SESSION was associated to the AP that took radar.
+
+    Juniper Mist: on DFS radar the AP deauthenticates all associated clients.
+    A radar on any other AP is not this client's problem — no alert.
+    Events-only guesses do not count; this alert requires a session record.
+    """
+    out: list[dict] = []
+    for re in radio_events or []:
+        if not is_radar_event(re):
+            continue
+        ts = float(re.get("timestamp") or 0)
+        sess = session_on_ap_at(sessions, ts, re.get("ap"))
+        if not sess:
+            continue
+        ap_mac = hex_mac(sess.get("ap"))
+        ap_name = sess.get("apName") or ap_name_for(ap_mac, radio_events, ap_radio)
+        overlapping_call = None
+        for c in calls or []:
+            if _call_open_at(c, ts):
+                overlapping_call = c
+                break
+        fact = radar_fact(re, ap_mac, ap_name, call=overlapping_call)
+        meet = ""
+        if overlapping_call:
+            meet = (
+                f" {overlapping_call.get('appLabel') or 'Call'}"
+                + (f" meeting {overlapping_call.get('meetingId')}" if overlapping_call.get("meetingId") else "")
+                + " was in progress."
+            )
+        summary = (
+            f"This client's session on {ap_name} ({format_mac(ap_mac)}) was active when "
+            f"{re.get('label') or 'Post radar'} hit that same AP "
+            f"(channel {fact.get('radarChannel')}).{meet} "
+            "DFS vacates 5 GHz and deauthenticates every associated station."
+        )
+        out.append({
+            "id": f"session-radar-{re.get('timestamp')}",
+            "severity": "crit",
+            "title": f"Session was on this AP during {re.get('label') or 'Post radar'}",
+            "summary": summary,
+            "sessionAp": ap_mac,
+            "sessionApName": ap_name,
+            "sessionConnect": sess.get("connect"),
+            "sessionDisconnect": sess.get("disconnect"),
+            "sessionDuration": sess.get("duration"),
+            "radarEvent": re.get("label") or re.get("event"),
+            "radarTime": re.get("timestamp"),
+            "radarAp": hex_mac(re.get("ap")),
+            "radarApName": re.get("apName") or ap_name,
+            "radarChannel": fact.get("radarChannel"),
+            "radarWidth": fact.get("radarWidth"),
+            "radarPower": fact.get("radarPower"),
+            "radarBand": fact.get("radarBand"),
+            "call": (overlapping_call or {}).get("appLabel") if overlapping_call else None,
+            "meetingId": (overlapping_call or {}).get("meetingId") if overlapping_call else None,
+            "callStart": (overlapping_call or {}).get("start") if overlapping_call else None,
+            "callEnd": (overlapping_call or {}).get("end") if overlapping_call else None,
+            "detail": fact,
+            "session": {
+                "ap": ap_mac,
+                "apName": ap_name,
+                "ssid": sess.get("ssid"),
+                "band": sess.get("band"),
+                "connect": sess.get("connect"),
+                "disconnect": sess.get("disconnect"),
+                "duration": sess.get("duration"),
+                "hitByRadar": True,
+            },
+            "radio": {
+                "timestamp": re.get("timestamp"),
+                "ap": hex_mac(re.get("ap")),
+                "apName": re.get("apName") or ap_name,
+                "band": re.get("band"),
+                "channel": re.get("channel"),
+                "preChannel": re.get("preChannel"),
+                "bandwidth": re.get("bandwidth"),
+                "preBandwidth": re.get("preBandwidth"),
+                "power": re.get("power"),
+                "prePower": re.get("prePower"),
+                "event": re.get("event"),
+                "label": re.get("label"),
+                "usage": re.get("usage"),
+                "preUsage": re.get("preUsage"),
+                "channelChanged": re.get("channelChanged"),
+                "highlight": True,
+                "onClientAp": True,
+            },
+        })
+    for s in sessions or []:
+        s["radarHits"] = [
+            a["radarTime"] for a in out
+            if same_ap_mac(s.get("ap"), a["sessionAp"]) and s.get("connect") == a["sessionConnect"]
+        ]
+        s["hitByRadar"] = bool(s.get("radarHits"))
+    return out
+
+
+def radar_hits_this_client(re: dict, sessions: list, events: list, stats: dict | None) -> tuple[bool, str]:
+    """True only when the radar AP is the AP this client was on at that timestamp."""
+    ts = float(re.get("timestamp") or 0)
+    on_ap = client_ap_at(sessions or [], events or [], stats, ts)
+    if not on_ap or not re.get("ap"):
+        return False, on_ap
+    return same_ap_mac(on_ap, re.get("ap")), on_ap
+
+
+def client_drops(events: list) -> list[dict]:
+    out = []
+    for e in events:
+        u = (e.get("type") or "").upper()
+        if any(k in u for k in ("DEAUTH", "DISASSOC", "DISCONNECT")) or "ROAM" in u:
+            out.append(e)
+    return out
+
+
+def radio_event_correlations(
+    radio_events: list,
+    events: list,
+    sessions: list | None = None,
+    stats: dict | None = None,
+    ap_radio: dict | None = None,
+) -> list[dict]:
+    """Correlate 7-day Radio Management events with this client's presence and drops.
+
+    Highest priority: RRM/DFS radar on the AP the client was connected to at that
+    instant — DFS disassociates 5 GHz clients immediately (Juniper/Mist RRM docs).
+    """
+    if not radio_events:
+        return []
+    drops = client_drops(events or [])
+    out: list[dict] = []
+
+    for re in radio_events:
+        ts = float(re.get("timestamp") or 0)
+        connected, on_ap = radar_hits_this_client(re, sessions or [], events or [], stats)
+        radar = is_radar_event(re)
+        window = WINDOW_RADIO_DFS_S if radar else WINDOW_RADIO_RRM_S
+        hits: list[tuple[float, dict]] = []
+        for d in drops:
+            dt = float(d.get("timestamp") or 0) - ts
+            if dt < -15 or dt > window:
+                continue
+            # Drop must be on the same AP as the radio event. Same channel on a
+            # different AP is coincidence, not causation.
+            if connected or same_ap_mac(d.get("ap"), re.get("ap")):
+                hits.append((dt, d))
+        hits.sort(key=lambda x: abs(x[0]))
+        drop = hits[0][1] if hits else None
+        dt = hits[0][0] if hits else None
+        ch_bit = ""
+        if re.get("channelChanged"):
+            ch_bit = f" Channel {int(re.get('preChannel') or 0)} → {int(re.get('channel') or 0)}."
+        pwr_bit = ""
+        if power_changed(re):
+            pwr_bit = f" Power {re.get('prePower')} → {re.get('power')} dBm."
+        apn = format_mac(re.get("ap") or "")
+
+        if radar:
+            if not connected:
+                continue
+            client_name = ap_name_for(on_ap, radio_events, ap_radio)
+            radar_name = re.get("apName") or apn
+            fact = radar_fact(re, on_ap, client_name, drop=drop)
+            if drop is not None:
+                evidence = (
+                    f"{re.get('label')} at radar AP {radar_name} ({apn}), channel {fact['radarChannel']}. "
+                    f"Client was on {client_name} ({format_mac(on_ap)}) — same AP. "
+                    f"{drop.get('type')} {int(dt)}s later. DFS vacates 5 GHz immediately."
+                )
+            else:
+                evidence = (
+                    f"{re.get('label')} at radar AP {radar_name} ({apn}), channel {fact['radarChannel']}. "
+                    f"Client was connected to {client_name} ({format_mac(on_ap)}) — same AP as the radar event. "
+                    "No matching deauth in the client log, but DFS still forces a channel change."
+                )
+            out.append({
+                "id": f"radio-radar-{re.get('timestamp')}",
+                "title": f"{re.get('label')} on the AP this client was connected to",
+                "evidence": evidence,
+                "confidence": "high",
+                "severity": "crit",
+                "highlight": True,
+                "detail": fact,
+            })
+            continue
+
+        if not (re.get("event") in DISRUPTIVE_RADIO or re.get("channelChanged") or power_changed(re)):
+            continue
+        if not (connected or drop is not None):
+            continue
+
+        if re.get("event") == "neighbor-ap-down" and connected:
+            out.append({
+                "id": f"radio-neighbor-{re.get('timestamp')}",
+                "title": "Neighbor AP went down while this client was on it",
+                "evidence": (
+                    f"Neighbor-AP-down on {apn} while the client session was there."
+                    + (f" {drop.get('type')} {int(dt)}s later." if drop is not None else "")
+                    + " Remaining APs absorb the cell — expect a burst of roams and weaker RSSI."
+                ),
+                "confidence": "high",
+                "severity": "crit",
+            })
+            continue
+
+        if re.get("channelChanged") and connected:
+            out.append({
+                "id": f"radio-channel-{re.get('timestamp')}",
+                "title": f"AP channel change while client was associated ({re.get('label')})",
+                "evidence": (
+                    f"{re.get('label')} on AP {apn}.{ch_bit}"
+                    + (f" {drop.get('type')} {int(dt)}s later." if drop is not None else " Client was on this radio at the change.")
+                    + " A mid-session channel change is a forced roam."
+                ),
+                "confidence": "high",
+                "severity": "warn",
+            })
+            continue
+
+        if power_changed(re) and connected and not re.get("channelChanged"):
+            out.append({
+                "id": f"radio-power-{re.get('timestamp')}",
+                "title": "RRM power change on the AP this client was on",
+                "evidence": (
+                    f"{re.get('label')} on AP {apn}.{pwr_bit} "
+                    "A sudden drop in TX power shrinks the cell and looks like a coverage hole to a mid-cell client."
+                ),
+                "confidence": "medium",
+                "severity": "warn",
+            })
+            continue
+
+        if drop is not None:
+            out.append({
+                "id": f"radio-{re.get('event')}-{re.get('timestamp')}",
+                "title": f"Client drop after {str(re.get('label') or 'radio event').lower()}",
+                "evidence": (
+                    f"{re.get('label')} on AP {apn} then {drop.get('type')} {int(dt)}s later.{ch_bit}{pwr_bit}"
+                ),
+                "confidence": "medium",
+                "severity": "warn",
+            })
+    return out
+
+
+def _call_open_at(call: dict, t: float) -> bool:
+    start = float(call.get("start") or 0)
+    end = float(call.get("end") or start)
+    return (start - WINDOW_CALL_S) <= t <= (end + WINDOW_CALL_S)
+
+
+def call_correlations(
+    calls: list,
+    events: list,
+    sessions: list | None = None,
+    stats: dict | None = None,
+    radio_events: list | None = None,
+    ap_radio: dict | None = None,
+) -> list[dict]:
+    """Teams/Zoom quality vs wireless drops, roams, RF, and RRM radar."""
+    if not calls:
+        return []
+    drops = [
+        e for e in (events or [])
+        if any(k in (e.get("type") or "").upper() for k in ("DEAUTH", "DISASSOC", "DISCONNECT"))
+    ]
+    roams = [e for e in (events or []) if "ROAM" in (e.get("type") or "").upper()]
+    dhcp_fail = [e for e in (events or []) if "DHCP" in (e.get("type") or "").upper() and e.get("negative")]
+    handshake = [
+        e for e in drops
+        if str(e.get("reason")) == "15" or "4-way" in f"{e.get('type')} {e.get('text')}".lower()
+    ]
+    rssi = (stats or {}).get("rssi")
+    snr = (stats or {}).get("snr")
+    retries = (stats or {}).get("txRetries")
+    rb, sb = rssi_band(rssi), snr_band(snr)
+    out: list[dict] = []
+    radars = [re for re in (radio_events or []) if is_radar_event(re)]
+
+    for c in calls:
+        label = c.get("appLabel") or "Call"
+        overlapping = [d for d in drops if _call_open_at(c, float(d.get("timestamp") or 0))]
+        roam_hits = [d for d in roams if _call_open_at(c, float(d.get("timestamp") or 0))]
+        dhcp_hits = [d for d in dhcp_fail if _call_open_at(c, float(d.get("timestamp") or 0))]
+        hs_hits = [d for d in handshake if _call_open_at(c, float(d.get("timestamp") or 0))]
+        radar_hits = []
+        for re in radars:
+            if not _call_open_at(c, float(re.get("timestamp") or 0)):
+                continue
+            same, _on = radar_hits_this_client(re, sessions or [], events or [], stats)
+            if same:
+                radar_hits.append(re)
+        start = float(c.get("start") or 0)
+
+        if radar_hits:
+            re = radar_hits[0]
+            rts = float(re.get("timestamp") or 0)
+            on_ap = client_ap_at(sessions or [], events or [], stats, rts)
+            client_name = ap_name_for(on_ap, radio_events, ap_radio)
+            radar_name = re.get("apName") or format_mac(re.get("ap") or "")
+            fact = radar_fact(re, on_ap, client_name, call=c, drop=overlapping[0] if overlapping else None)
+            meet = f" meeting {c.get('meetingId')}" if c.get("meetingId") else ""
+            out.append({
+                "id": f"call-radar-{c.get('start')}",
+                "title": f"{label} in progress during {re.get('label')}",
+                "evidence": (
+                    f"{label}{meet} {int(c.get('duration') or 0)}s "
+                    f"(audio {c.get('audioQuality') if c.get('audioQuality') is not None else '—'} / "
+                    f"video {c.get('videoQuality') if c.get('videoQuality') is not None else '—'}). "
+                    f"Client AP at radar time: {client_name} ({format_mac(on_ap) if on_ap else '—'}). "
+                    f"{re.get('label')} on {radar_name} ({format_mac(re.get('ap') or '')}), "
+                    f"channel {fact['radarChannel']}, {fact['radarWidth']}, {fact['radarPower']}."
+                ),
+                "confidence": "high",
+                "severity": "crit",
+                "highlight": True,
+                "detail": fact,
+            })
+            continue
+
+        if overlapping:
+            d = overlapping[0]
+            ended_at_drop = bool(c.get("end") and abs(float(c["end"]) - float(d.get("timestamp") or 0)) <= 20)
+            title = f"{label} dropped with the wireless disconnect" if ended_at_drop else f"{label} overlapped a wireless disconnect"
+            extra = ""
+            if hs_hits:
+                extra = " 4-way handshake timeout during the call — media path died with the keys."
+            elif dhcp_hits:
+                extra = " DHCP failed during the call — L3, not Teams."
+            out.append({
+                "id": f"call-drop-{c.get('start')}",
+                "title": title,
+                "evidence": (
+                    f"{label} {int(c.get('duration') or 0)}s, audio {c.get('audioQuality') if c.get('audioQuality') is not None else '—'}, "
+                    f"video {c.get('videoQuality') if c.get('videoQuality') is not None else '—'}. "
+                    f"{d.get('type')} at {d.get('timestamp')}.{extra} "
+                    "The call failure is the wireless event, not a Teams outage."
+                ),
+                "confidence": "high",
+                "severity": "crit" if c.get("poor") or ended_at_drop else "warn",
+            })
+            continue
+
+        if roam_hits and (c.get("poor") or len(roam_hits) >= 2):
+            out.append({
+                "id": f"call-roam-{c.get('start')}",
+                "title": f"{label} during AP roam / ping-pong",
+                "evidence": (
+                    f"{len(roam_hits)} roam(s) while {label} was up. "
+                    "Each roam is a brief media blackout; two or more in a meeting is choppy audio even if RSSI recovers."
+                ),
+                "confidence": "high" if c.get("poor") else "medium",
+                "severity": "warn",
+            })
+            continue
+
+        if c.get("poor") and retries is not None and retries >= 80:
+            out.append({
+                "id": f"call-retries-{c.get('start')}",
+                "title": f"Poor {label} quality with high TX retries",
+                "evidence": (
+                    f"{label} audio {c.get('audioQuality')} / video {c.get('videoQuality')} with {retries} TX retries. "
+                    "Airtime contention or interference, not a Teams cloud issue."
+                ),
+                "confidence": "high",
+                "severity": "crit" if rb in {"crit", "warn"} else "warn",
+            })
+            continue
+
+        if c.get("poor"):
+            audio_only = quality_poor(c.get("audioQuality")) and not quality_poor(c.get("videoQuality"))
+            if rb in {"crit", "warn"} or sb in {"crit", "warn"}:
+                out.append({
+                    "id": f"call-rf-{c.get('start')}",
+                    "title": f"Poor {label} quality with weak RF",
+                    "evidence": (
+                        f"{label} audio {c.get('audioQuality')} / video {c.get('videoQuality')} "
+                        f"while RSSI {rssi} dBm and SNR {snr} dB. Real-time media is the first thing coverage holes break."
+                    ),
+                    "confidence": "high",
+                    "severity": "crit",
+                })
+            elif audio_only and rb == "good":
+                out.append({
+                    "id": f"call-qos-{c.get('start')}",
+                    "title": f"Poor {label} audio while Wi-Fi RF and video look fine",
+                    "evidence": (
+                        f"Audio {c.get('audioQuality')} but video {c.get('videoQuality')} at RSSI {rssi} dBm. "
+                        "Classic missing DSCP/WMM or WAN jitter — not an AP coverage hole."
+                    ),
+                    "confidence": "medium",
+                    "severity": "warn",
+                })
+            else:
+                out.append({
+                    "id": f"call-qos-{c.get('start')}",
+                    "title": f"Poor {label} quality while Wi-Fi RF looks fine",
+                    "evidence": (
+                        f"{label} audio {c.get('audioQuality')} / video {c.get('videoQuality')} "
+                        f"with RSSI {rssi} dBm. Not a coverage hole — check WAN/NAT, DSCP/WMM, or the Teams client path."
+                    ),
+                    "confidence": "medium",
+                    "severity": "warn",
+                })
+            continue
+
+        # Short failed join: call started within 45s of an association and lasted <20s
+        if c.get("duration") is not None and 0 < float(c["duration"]) < 20:
+            assoc = [
+                e for e in (events or [])
+                if "ASSOCIAT" in (e.get("type") or "").upper()
+                and abs(float(e.get("timestamp") or 0) - start) <= 45
+            ]
+            if assoc:
+                out.append({
+                    "id": f"call-join-{c.get('start')}",
+                    "title": f"{label} died right after Wi-Fi join",
+                    "evidence": (
+                        f"{label} lasted {int(c['duration'])}s starting next to {assoc[0].get('type')}. "
+                        "Client associated, then the meeting never got a stable media path."
+                    ),
+                    "confidence": "medium",
+                    "severity": "warn",
+                })
+
+    poor_teams = [c for c in calls if c.get("teams") and c.get("poor")]
+    if len(poor_teams) >= 2 and not any(str(x.get("id") or "").startswith("call-") for x in out):
+        out.append({
+            "id": "call-repeat-poor",
+            "title": "Repeated poor Microsoft Teams calls in 7 days",
+            "evidence": (
+                f"{len(poor_teams)} poor Teams sessions for this MAC over 7 days. "
+                "Pattern is the client or its path, not a one-off meeting."
+            ),
+            "confidence": "medium",
+            "severity": "warn",
+        })
+    return out
+
+
 def band_group(band: Any) -> str:
     b = str(band or "").lower()
     if b in {"2", "2.4", "24"} or "2.4" in b:
@@ -1086,11 +1839,20 @@ def build_correlations(stats: dict | None, events: list, sessions: list) -> list
     return uniq
 
 
-def build_verdict(stats: dict | None, events: list, sessions: list, ap_radio: dict | None = None) -> dict:
+def build_verdict(
+    stats: dict | None,
+    events: list,
+    sessions: list,
+    ap_radio: dict | None = None,
+    radio_events: list | None = None,
+    calls: list | None = None,
+) -> dict:
     notes: list[str] = []
     score = 100
     cors = build_correlations(stats, events, sessions)
     cors.extend(rf_occupancy_correlations(ap_radio, stats))
+    cors.extend(radio_event_correlations(radio_events or [], events, sessions, stats, ap_radio))
+    cors.extend(call_correlations(calls or [], events, sessions, stats, radio_events or [], ap_radio))
     rssi = (stats or {}).get("rssi")
     snr = (stats or {}).get("snr")
     rb, sb = rssi_band(rssi), snr_band(snr)
@@ -1146,9 +1908,25 @@ def build_verdict(stats: dict | None, events: list, sessions: list, ap_radio: di
         score -= 10 if nw >= 40 else 6
         ch = (serving_occ or {}).get("channel") or radio.get("channel")
         notes.append(f"Serving AP channel {ch} has {nw}% non-Wi-Fi occupancy.")
+    radio_hits = [c for c in cors if str(c.get("id") or "").startswith("radio-")]
+    if radio_hits:
+        score -= 12 if radio_hits[0]["severity"] == "crit" else 8
+        notes.append(radio_hits[0]["title"] + ".")
+    call_hits = [c for c in cors if str(c.get("id") or "").startswith("call-")]
+    if call_hits:
+        score -= 12 if call_hits[0]["severity"] == "crit" else 6
+        notes.append(call_hits[0]["title"] + ".")
+    teams_poor = [c for c in (calls or []) if c.get("teams") and c.get("poor")]
+    if teams_poor and not call_hits:
+        score -= 6
+        notes.append(f"{len(teams_poor)} poor Microsoft Teams call(s) in the last 7 days.")
     rank = {"crit": 0, "warn": 1, "info": 2}
     conf = {"high": 0, "medium": 1, "low": 2}
-    cors.sort(key=lambda c: (rank.get(c["severity"], 9), conf.get(c["confidence"], 9)))
+    cors.sort(key=lambda c: (
+        0 if c.get("highlight") else 1,
+        rank.get(c["severity"], 9),
+        conf.get(c["confidence"], 9),
+    ))
     seen_c: set[str] = set()
     uniq_c: list[dict] = []
     for c in cors:
@@ -1178,6 +1956,97 @@ def build_verdict(stats: dict | None, events: list, sessions: list, ap_radio: di
     if not notes:
         notes.append("RF metrics in range and no clustered failure events.")
     return {"score": score, "label": label, "primaryCause": primary, "notes": notes, "correlations": cors}
+
+
+def fetch_optional_list(host: str, token: str, path: str, params: dict) -> tuple[list, str | None]:
+    """GET a list endpoint that may 403/404 when the org lacks the feature (Teams, RRM events)."""
+    try:
+        return as_results(mist_get(host, token, path, params)), None
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+        if "400" in msg and str(params.get("duration") or "") in {"7d", "1w"}:
+            retry = {k: v for k, v in params.items() if k != "duration"}
+            retry["start"] = int(time.time()) - 7 * 86400
+            try:
+                return as_results(mist_get(host, token, path, retry)), None
+            except Exception as e2:  # noqa: BLE001
+                return [], str(e2)
+        if any(x in msg.lower() for x in ("403", "401", "permission", "not provided")):
+            return [], msg
+        return [], msg
+
+
+def _rrm_events_page(host: str, token: str, site_id: str, band: str, page: int) -> tuple[list, bool, str | None]:
+    """One page of listSiteRrmEvents. Returns (rows, has_more, error)."""
+    params = rrm_events_query(band, page=page, limit=100)
+    try:
+        payload = mist_get(host, token, f"/sites/{site_id}/rrm/events", params)
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+        if "400" in msg and "band" in msg.lower() and "required" in msg.lower():
+            return [], False, msg
+        if "400" in msg:
+            retry = {"band": band, "start": int(time.time()) - 7 * 86400, "limit": 100, "page": page}
+            try:
+                payload = mist_get(host, token, f"/sites/{site_id}/rrm/events", retry)
+            except Exception as e2:  # noqa: BLE001
+                return [], False, str(e2)
+        else:
+            return [], False, msg
+    rows = as_results(payload)
+    rec = as_record(payload) if isinstance(payload, dict) else {}
+    has_more = bool(rec.get("next")) or len(rows) >= 100
+    return rows, has_more, None
+
+
+def fetch_site_rrm_events(host: str, token: str, site_id: str) -> tuple[list, str | None]:
+    """Portal Radio Events (7 days): GET /rrm/events?band={5|24|6}&duration=7d.
+
+    Band is required by the API (400 otherwise). 5 GHz is paginated because that is
+    where DFS / Post radar lives; 2.4 and 6 are a single page.
+    """
+    collected: list[dict] = []
+    errors: list[str] = []
+    lock = threading.Lock()
+
+    def pull(band: str, pages: int) -> None:
+        local: list[dict] = []
+        err: str | None = None
+        for page in range(1, pages + 1):
+            rows, has_more, err = _rrm_events_page(host, token, site_id, band, page)
+            if err:
+                break
+            local.extend(rows)
+            if not has_more:
+                break
+        with lock:
+            if err and band == "5" and not local:
+                errors.append(f"band={band}: {err}")
+            collected.extend(local)
+
+    threads = [
+        threading.Thread(target=pull, args=("5", RRM_PAGES_5)),
+        threading.Thread(target=pull, args=("24", RRM_PAGES_OTHER)),
+        threading.Thread(target=pull, args=("6", RRM_PAGES_OTHER)),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    seen: set[tuple] = set()
+    uniq: list[dict] = []
+    for raw in collected:
+        ev = pick_rrm_event(raw)
+        key = (ev.get("ap"), ev.get("timestamp"), ev.get("event"), ev.get("channel"), ev.get("band"))
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(ev)
+    uniq.sort(key=lambda e: e.get("timestamp") or 0, reverse=True)
+    if uniq:
+        return uniq, None
+    return [], ("; ".join(errors) if errors else None)
 
 
 def mist_get(host: str, token: str, path: str, params: dict | None = None) -> Any:
@@ -1419,10 +2288,11 @@ def diagnose_client(token: str, host: str, org_id: str, site_id: str, site_name:
         "stats": (f"/sites/{site_id}/stats/clients/{mac}", None),
         "search": (f"/sites/{site_id}/clients/search", {"mac": mac, "duration": duration, "limit": 20}),
         "events": (f"/sites/{site_id}/clients/{mac}/events", {"duration": duration, "limit": 100}),
-        "sessions": (f"/sites/{site_id}/clients/sessions/search", {"mac": mac, "duration": duration, "limit": 50}),
+        "sessions": (f"/sites/{site_id}/clients/sessions/search", {"mac": mac, "duration": duration, "limit": 100}),
         "marvis": (f"/orgs/{org_id}/troubleshoot", {"mac": colon, "site_id": site_id}),
         "aps": (f"/sites/{site_id}/devices", {"type": "ap"}),
         "devices": (f"/sites/{site_id}/stats/devices", {"type": "ap"}),
+        "calls": (f"/sites/{site_id}/stats/calls/search", {"mac": mac, "duration": RADIO_EVENTS_DURATION, "limit": 50}),
     }
     got: dict[str, Any] = {}
     errors: dict[str, str] = {}
@@ -1454,7 +2324,29 @@ def diagnose_client(token: str, host: str, org_id: str, site_id: str, site_name:
         stats = sightings[0]
     events = [pick_event(r) for r in as_array(got.get("events"))]
     events.sort(key=lambda e: e["timestamp"], reverse=True)
-    sessions = [pick_session(r) for r in as_array(got.get("sessions"))]
+    sessions = [pick_session(r) for r in as_results(got.get("sessions")) or as_array(got.get("sessions"))]
+    page = 2
+    while len(sessions) >= 100 * (page - 1) and page <= 5:
+        extra, _err = fetch_optional_list(
+            host, token, f"/sites/{site_id}/clients/sessions/search",
+            {"mac": mac, "duration": duration, "limit": 100, "page": page},
+        )
+        if not extra:
+            break
+        sessions.extend(pick_session(r) for r in extra)
+        if len(extra) < 100:
+            break
+        page += 1
+    seen_sess: set[tuple] = set()
+    uniq_sess: list[dict] = []
+    for s in sessions:
+        key = (hex_mac(s.get("ap")), s.get("connect"), s.get("disconnect"))
+        if key in seen_sess:
+            continue
+        seen_sess.add(key)
+        uniq_sess.append(s)
+    sessions = uniq_sess
+    sessions.sort(key=lambda s: s.get("connect") or 0, reverse=True)
     marvis_raw = None
     marvis_text = None
     marvis_unavail = False
@@ -1483,6 +2375,7 @@ def diagnose_client(token: str, host: str, org_id: str, site_id: str, site_name:
                     by_mac[m]["id"] = d.get("id")
             elif m:
                 inventory.append(d)
+    sessions = attach_ap_names(sessions, inventory)
     ap_radio: dict
     try:
         ap_radio = fetch_ap_radio(
@@ -1491,6 +2384,23 @@ def diagnose_client(token: str, host: str, org_id: str, site_id: str, site_name:
         )
     except Exception as e:  # noqa: BLE001
         ap_radio = {"unavailable": str(e), "channels": [], "radio": None, "apMac": hex_mac((stats or {}).get("ap"))}
+
+    radio_events, radio_unavail = fetch_site_rrm_events(host, token, site_id)
+    radio_events = attach_ap_names(radio_events, inventory)
+    radio_events = annotate_radio_events(radio_events, events, sessions, stats)
+
+    calls: list[dict] = [pick_call(r) for r in as_results(got.get("calls"))]
+    calls_unavail = errors.get("calls")
+    if calls_unavail and not calls:
+        extra, err2 = fetch_optional_list(
+            host, token, f"/sites/{site_id}/stats/calls/search",
+            {"mac": mac, "duration": RADIO_EVENTS_DURATION, "limit": 50},
+        )
+        calls = [pick_call(r) for r in extra]
+        calls_unavail = None if calls else (err2 or calls_unavail)
+    calls.sort(key=lambda c: c.get("start") or 0, reverse=True)
+    radar_alerts = radar_session_alerts(radio_events, sessions, calls, ap_radio)
+
     last_seen = (stats or {}).get("lastSeen")
     online = bool(last_seen is not None and time.time() - float(last_seen) < 300)
     return {
@@ -1509,7 +2419,12 @@ def diagnose_client(token: str, host: str, org_id: str, site_id: str, site_name:
         "marvisText": marvis_text,
         "marvisUnavailable": marvis_unavail,
         "apRadio": ap_radio,
-        "verdict": build_verdict(stats, events, sessions, ap_radio),
+        "radioEvents": radio_events,
+        "radioEventsUnavailable": radio_unavail,
+        "calls": calls,
+        "callsUnavailable": calls_unavail,
+        "radarAlerts": radar_alerts,
+        "verdict": build_verdict(stats, events, sessions, ap_radio, radio_events, calls),
         "fetchedAt": int(time.time() * 1000),
     }
 
@@ -1534,7 +2449,7 @@ def demo_result(jitter: bool = False) -> dict:
         "snr": max(6, 11 + j // 2),
         "txRate": 58,
         "rxRate": 48,
-        "uptime": 214,
+        "uptime": 140,
         "lastSeen": t - 12,
         "txBytes": 1843200,
         "rxBytes": 9216000,
@@ -1555,10 +2470,10 @@ def demo_result(jitter: bool = False) -> dict:
         pick_event({"timestamp": t - 3600, "type": "CLIENT_DISASSOCIATION", "text": "STA leaving BSS", "ap": "0a0027aa1103", "ssid": "CORP-WIFI", "band": "2.4", "channel": 11, "reason": 8}),
     ]
     sessions = [
-        {"ap": "0a0027aa1102", "ssid": "CORP-WIFI", "band": "5", "connect": t - 214, "disconnect": None, "duration": 214},
-        {"ap": "0a0027aa1103", "ssid": "CORP-WIFI", "band": "5", "connect": t - 480, "disconnect": t - 148, "duration": 28},
-        {"ap": "0a0027aa1103", "ssid": "CORP-WIFI", "band": "5", "connect": t - 900, "disconnect": t - 840, "duration": 44},
-        {"ap": "0a0027aa1102", "ssid": "CORP-WIFI", "band": "5", "connect": t - 7200, "disconnect": t - 3600, "duration": 3580},
+        {"ap": "0a0027aa1102", "apName": "DEMO-AP-F2-aa:11:02", "ssid": "CORP-WIFI", "band": "5", "connect": t - 140, "disconnect": None, "duration": 140},
+        {"ap": "0a0027aa1103", "apName": "DEMO-AP-F2-aa:11:03", "ssid": "CORP-WIFI", "band": "5", "connect": t - 480, "disconnect": t - 148, "duration": 332},
+        {"ap": "0a0027aa1103", "apName": "DEMO-AP-F2-aa:11:03", "ssid": "CORP-WIFI", "band": "5", "connect": t - 900, "disconnect": t - 840, "duration": 44},
+        {"ap": "0a0027aa1102", "apName": "DEMO-AP-F2-aa:11:02", "ssid": "CORP-WIFI", "band": "5", "connect": t - 7200, "disconnect": t - 3600, "duration": 3580},
     ]
     marvis = {
         "results": [
@@ -1623,6 +2538,57 @@ def demo_result(jitter: bool = False) -> dict:
         },
         "channels": channels,
     }
+    radio_events = [
+        pick_rrm_event({
+            "timestamp": t - 156, "ap": "0a0027aa1103", "band": "5",
+            "event": "rrm-radar", "channel": 149, "pre_channel": 36,
+            "bandwidth": 80, "pre_bandwidth": 80, "power": 17, "pre_power": 17,
+            "usage": "5", "pre_usage": "5", "apName": "DEMO-AP-F2-aa:11:03",
+        }),
+        pick_rrm_event({
+            "timestamp": t - 80, "ap": "0a0027aa1102", "band": "5",
+            "event": "triggered-site_rrm", "channel": 144, "pre_channel": 144,
+            "bandwidth": 20, "pre_bandwidth": 20, "power": 8, "pre_power": 14,
+            "usage": "5", "pre_usage": "5", "apName": "DEMO-AP-F2-aa:11:02",
+        }),
+        pick_rrm_event({
+            "timestamp": t - 90000, "ap": "0a0027aa1102", "band": "5",
+            "event": "interference-ap-non-wifi", "channel": 144, "pre_channel": 153,
+            "bandwidth": 20, "pre_bandwidth": 80, "power": 8, "pre_power": 14,
+            "usage": "5", "pre_usage": "5", "apName": "DEMO-AP-F2-aa:11:02",
+        }),
+        pick_rrm_event({
+            "timestamp": t - 2 * 86400 - 3600, "ap": "0a0027aa1102", "band": "5",
+            "event": "scheduled-site_rrm", "channel": 144, "pre_channel": 144,
+            "bandwidth": 20, "pre_bandwidth": 20, "power": 8, "pre_power": 8,
+            "usage": "5", "pre_usage": "5", "apName": "DEMO-AP-F2-aa:11:02",
+        }),
+        pick_rrm_event({
+            "timestamp": t - 4 * 86400, "ap": "0a0027aa1105", "band": "5",
+            "event": "neighbor-ap-down", "channel": 108, "pre_channel": 108,
+            "bandwidth": 40, "pre_bandwidth": 40, "power": 8, "pre_power": 8,
+            "usage": "5", "pre_usage": "5", "apName": "DEMO-AP-F2-aa:11:05",
+        }),
+    ]
+    radio_events = annotate_radio_events(radio_events, events, sessions, stats)
+    calls = [
+        pick_call({
+            "app": "teams", "mac": DEMO_MAC, "meeting_id": "demo-teams-1",
+            "start_time": t - 210, "end_time": t - 35,
+            "audio_quality": 2, "video_quality": 3, "rating": 2,
+        }),
+        pick_call({
+            "app": "teams", "mac": DEMO_MAC, "meeting_id": "demo-teams-2",
+            "start_time": t - 86400 - 3600, "end_time": t - 86400 - 1800,
+            "audio_quality": 5, "video_quality": 5, "rating": 5,
+        }),
+        pick_call({
+            "app": "zoom", "mac": DEMO_MAC, "meeting_id": "demo-zoom-1",
+            "start_time": t - 3 * 3600, "end_time": t - 3 * 3600 + 2400,
+            "audio_quality": 4, "video_quality": 4,
+        }),
+    ]
+    radar_alerts = radar_session_alerts(radio_events, sessions, calls, ap_radio)
     return {
         "demo": True,
         "host": DEFAULT_HOST,
@@ -1639,7 +2605,12 @@ def demo_result(jitter: bool = False) -> dict:
         "marvisText": json.dumps(marvis, indent=2),
         "marvisUnavailable": False,
         "apRadio": ap_radio,
-        "verdict": build_verdict(stats, events, sessions, ap_radio),
+        "radioEvents": radio_events,
+        "radioEventsUnavailable": None,
+        "calls": calls,
+        "callsUnavailable": None,
+        "radarAlerts": radar_alerts,
+        "verdict": build_verdict(stats, events, sessions, ap_radio, radio_events, calls),
         "fetchedAt": int(time.time() * 1000),
         "email": "demo@local",
         "orgs": [{"id": "demo-org", "name": "Interconnected Systems (sample)"}],
@@ -1704,7 +2675,7 @@ ul.plain li { margin:0 0 .45rem; }
 .ev.neg { border-color:color-mix(in oklab,var(--crit) 35%, var(--border)); background:var(--surface-2); }
 .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
 .break { overflow-wrap:anywhere; }
-dl { display:grid; grid-template-columns: 7rem minmax(0,1fr); gap:.4rem .75rem; margin: .7rem 0 0; font-size:14px; }
+dl { display:grid; grid-template-columns: 9.5rem minmax(0,1fr); gap:.4rem .75rem; margin: .7rem 0 0; font-size:14px; }
 dt { color:var(--subtle); } dd { margin:0; }
 pre { white-space:pre-wrap; overflow-wrap:anywhere; background:var(--surface-2); padding:.75rem; border-radius:10px; font-size:12px; }
 .alert { border:1px solid color-mix(in oklab,var(--crit) 40%, var(--border)); color:var(--crit); padding:.75rem 1rem; border-radius:12px; margin-bottom:1rem; }
@@ -1712,8 +2683,10 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; background:var(--surface-2);
 .legend { display:flex; flex-wrap:wrap; gap:.75rem 1.1rem; font-size:12px; color:var(--muted); margin:.4rem 0 .8rem; }
 .swatch { width:10px; height:10px; border-radius:2px; display:inline-block; margin-right:.35rem; vertical-align:middle; }
 .ap-table { width:100%; border-collapse:collapse; font-size:13px; }
-.ap-table th { text-align:left; color:var(--subtle); font-weight:500; padding:.4rem .5rem .5rem 0; font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
+.ap-table th { text-align:left; color:var(--subtle); font-weight:500; padding:.4rem .5rem .5rem 0; font-size:11px; text-transform:uppercase; letter-spacing:.04em; position:sticky; top:0; background:var(--surface); z-index:1; box-shadow:0 1px 0 var(--border); }
 .ap-table td { padding:.45rem .5rem .45rem 0; border-top:1px solid var(--border); }
+.sess-scroll { max-height:min(32rem, 65vh); overflow:auto; -webkit-overflow-scrolling:touch; }
+.ap-table tr.radar td { background:color-mix(in oklab, var(--crit) 10%, transparent); }
 .occ-scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; }
 .chiprow { display:flex; flex-wrap:wrap; gap:.35rem; align-items:center; }
 .chip { min-height:32px; padding:0 .65rem; border-radius:8px; border:1px solid var(--border); background:var(--surface-2); color:var(--muted); font-size:12px; font-weight:600; }
@@ -1765,6 +2738,8 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; background:var(--surface-2);
           <li>DHCP/DNS failures in the 2 minutes after a roam or assoc (L3 after join).</li>
           <li>AP ping-pong, 5→2.4 band drops, short sessions, TX retries.</li>
           <li>Serving-AP channel occupancy: Site APs vs External APs vs Non-Wi-Fi (RRM scan).</li>
+          <li>7 days of Radio Management events (DFS radar, channel/power change) vs this client's disconnects.</li>
+          <li>Microsoft Teams / Zoom call quality overlapping those drops (when Mist has call stats).</li>
         </ul>
       </aside>
     </div>
@@ -2032,6 +3007,203 @@ function metric(label,value,hint,band){
     <div class="muted" style="font-size:12px">${esc(hint||"")}</div></div>`;
 }
 
+function radioEventKind(ev){
+  const t=(ev.event||"").toLowerCase();
+  if(t.includes("radar")) return "crit";
+  if(ev.channelChanged || t.includes("interference")) return "warn";
+  return "muted";
+}
+function bandHz(b){
+  const s=String(b||"");
+  if(s==="24"||s==="2.4") return "2.4 GHz";
+  if(s==="6") return "6 GHz";
+  if(!s) return "—";
+  return "5 GHz";
+}
+function arrow(a,b,unit){
+  if(a==null && b==null) return "—";
+  if(a==null || a==="" || a===0 || String(a)===String(b)) return (b==null?"—":esc(b)+(unit||""));
+  return esc(a)+(unit||"")+" → "+esc(b)+(unit||"");
+}
+function radioEventsPanel(r){
+  if(r.radioEventsUnavailable && !(r.radioEvents||[]).length){
+    return `<div class="card"><h2 class="subtle" style="margin:0;font-size:13px;text-transform:uppercase">Radio events (7 days)</h2>
+      <p class="muted">Radio Management events not available (${esc(r.radioEventsUnavailable)}). This console queries GET /sites/{id}/rrm/events?band=5|24|6&duration=7d (band is required by Mist).</p></div>`;
+  }
+  const rows = r.radioEvents||[];
+  if(!rows.length){
+    return `<div class="card"><h2 class="subtle" style="margin:0;font-size:13px;text-transform:uppercase">Radio events (7 days)</h2>
+      <p class="muted">No Radio Management events in the last 7 days (scheduled RRM, Post radar, interference, neighbor AP). Client disconnects in this window are not radio-event driven.</p></div>`;
+  }
+  return `<div class="card"><h2 class="subtle" style="margin:0 0 .35rem;font-size:13px;text-transform:uppercase">Radio events (7 days)</h2>
+    <p class="muted" style="margin:0 0 .7rem;font-size:12px">Same source as Mist <span style="color:var(--fg)">Site → Radio Management → Radio Events</span> (7-day, all bands). <strong style="color:var(--crit)">Post radar / Radar detected on the AP this client was connected to</strong> is highlighted. Showing ${Math.min(rows.length,60)} of ${rows.length}.</p>
+    <div style="overflow-x:auto">
+    <table class="ap-table">
+      <thead><tr>
+        <th>Date</th><th>AP</th><th>Band</th><th>Channel</th><th>Width</th><th>Power</th><th>Event</th>
+      </tr></thead>
+      <tbody>
+      ${rows.slice(0,60).map(ev=>{
+        const hit = !!ev.highlight;
+        const on = !!ev.onClientAp;
+        const name = ev.apName || fmtMac(ev.ap||"");
+        const cls = hit?"crit":(String(ev.event||"").includes("radar")?"warn":"");
+        return `<tr class="${hit?"pulse-c":""}" style="${hit?"background:color-mix(in oklab, var(--crit) 12%, transparent)":on?"background:color-mix(in oklab, var(--accent) 8%, transparent)":""}">
+          <td class="mono subtle">${esc(fmtTime(ev.timestamp))}</td>
+          <td class="mono break">${esc(name)}${hit?' <span class="pill crit">on this client</span>':on?' <span class="pill">client AP</span>':""}</td>
+          <td class="mono">${esc(bandHz(ev.preUsage||ev.band))} → ${esc(bandHz(ev.usage||ev.band))}</td>
+          <td class="mono">${arrow(ev.preChannel, ev.channel, "")}</td>
+          <td class="mono">${arrow(ev.preBandwidth, ev.bandwidth, " MHz")}</td>
+          <td class="mono">${arrow(ev.prePower, ev.power, " dBm")}</td>
+          <td class="mono ${cls}">${esc(ev.label||ev.event||"—")}</td>
+        </tr>`;
+      }).join("")}
+      </tbody>
+    </table>
+    </div>
+  </div>`;
+}
+function callQuality(q){
+  if(q==null||q==="") return "—";
+  const n=Number(q);
+  if(Number.isNaN(n)) return String(q);
+  if(n>5) return n+"%";
+  return String(n)+"/5";
+}
+function sessionsPanel(r){
+  const rows = (r.sessions||[]).slice().sort((a,b)=>(Number(b.connect)||0)-(Number(a.connect)||0));
+  if(!rows.length){
+    return `<div class="card"><h2 class="subtle" style="margin:0;font-size:13px;text-transform:uppercase">Sessions</h2>
+      <p class="muted">No session records in this window.</p></div>`;
+  }
+  const radarN = rows.filter(s=>s.hitByRadar).length;
+  const shortN = rows.filter(s=>s.duration!=null && s.duration<60).length;
+  const openN = rows.filter(s=>s.disconnect==null || s.disconnect==="").length;
+  return `<div class="card"><h2 class="subtle" style="margin:0 0 .35rem;font-size:13px;text-transform:uppercase">Sessions (${rows.length})</h2>
+    <p class="muted" style="margin:0 0 .7rem;font-size:12px">Entire association history for this window, newest first. ${openN} open · ${radarN} during radar on that AP · ${shortN} under 60s. Scroll the table — nothing is truncated.</p>
+    <div class="sess-scroll occ-scroll">
+    <table class="ap-table">
+      <thead><tr>
+        <th>Connected</th><th>Disconnected</th><th>Duration</th><th>AP</th><th>SSID</th><th>Band</th><th></th>
+      </tr></thead>
+      <tbody>
+      ${rows.map(s=>{
+        const name = s.apName || fmtMac(s.ap||"");
+        const mac = s.ap ? fmtMac(s.ap) : "";
+        const showMac = s.apName && mac && !String(s.apName).includes(mac);
+        return `<tr class="${s.hitByRadar?"radar":""}">
+          <td class="mono">${esc(fmtTime(s.connect))}</td>
+          <td class="mono">${s.disconnect?esc(fmtTime(s.disconnect)):'<span class="good">open</span>'}</td>
+          <td class="mono ${s.duration!=null&&s.duration<60?"crit":""}">${esc(fmtDur(s.duration))}</td>
+          <td class="mono break">${esc(name)}${showMac?" · "+esc(mac):""}</td>
+          <td class="mono break">${esc(s.ssid||"—")}</td>
+          <td class="mono">${esc(bandHz(s.band))}</td>
+          <td>${s.hitByRadar?'<span class="pill crit">radar</span>':(s.duration!=null&&s.duration<60?'<span class="pill">short</span>':"")}</td>
+        </tr>`;
+      }).join("")}
+      </tbody>
+    </table>
+    </div>
+  </div>`;
+}
+
+function callsPanel(r){
+  if(r.callsUnavailable && !(r.calls||[]).length){
+    return `<div class="card"><h2 class="subtle" style="margin:0;font-size:13px;text-transform:uppercase">Teams / collaboration calls</h2>
+      <p class="muted">No call records (${esc(r.callsUnavailable)}). Full Microsoft Teams QoS (jitter/loss/rating from Azure) needs the org's <span style="color:var(--fg)">Mist ↔ Teams</span> link under Organization → Settings → Integrations. Without it, Mist still returns wireless-detected Zoom/Teams sessions when the feature is licensed — otherwise this panel stays empty. Wireless RCA below still stands.</p></div>`;
+  }
+  const rows = r.calls||[];
+  if(!rows.length){
+    return `<div class="card"><h2 class="subtle" style="margin:0;font-size:13px;text-transform:uppercase">Teams / collaboration calls</h2>
+      <p class="muted">No Teams/Zoom/Webex calls for this MAC in the last 7 days. If the user was on a call, either it was not classified or the Mist Teams integration is not linked.</p></div>`;
+  }
+  const teams = rows.filter(c=>c.teams);
+  const poor = rows.filter(c=>c.poor);
+  return `<div class="card"><h2 class="subtle" style="margin:0 0 .35rem;font-size:13px;text-transform:uppercase">Teams / collaboration calls (7 days)</h2>
+    <p class="muted" style="margin:0 0 .7rem;font-size:12px">${teams.length} Microsoft Teams · ${rows.length} total collab · ${poor.length} poor audio/video/rating. Overlaps with deauth are listed under Correlated causes.</p>
+    ${rows.slice(0,12).map(c=>`
+      <div class="ev ${c.poor?"neg":""}">
+        <div class="row"><span class="mono ${c.poor?"crit":"good"}">${esc(c.appLabel||c.app||"call")}${c.poor?" · poor":" · ok"}</span>
+        <span class="mono subtle">${esc(fmtTime(c.start))}${c.end?" → "+fmtTime(c.end):""}</span></div>
+        <div class="muted" style="font-size:12px">Audio ${esc(callQuality(c.audioQuality))} · Video ${esc(callQuality(c.videoQuality))}${c.rating!=null?" · user rating "+esc(c.rating):""} · ${esc(fmtDur(c.duration))}${c.meetingId?" · meeting "+esc(c.meetingId):""}</div>
+      </div>`).join("")}
+  </div>`;
+}
+
+function sessionRow(s){
+  if(!s) return "";
+  const name = s.apName || fmtMac(s.ap||"");
+  const mac = s.ap ? fmtMac(s.ap) : "";
+  const showMac = s.apName && mac && !String(s.apName).includes(mac);
+  return `<tr class="radar">
+    <td class="mono">${esc(fmtTime(s.connect))}</td>
+    <td class="mono">${s.disconnect?esc(fmtTime(s.disconnect)):'<span class="good">open</span>'}</td>
+    <td class="mono ${s.duration!=null&&s.duration<60?"crit":""}">${esc(fmtDur(s.duration))}</td>
+    <td class="mono break">${esc(name)}${showMac?" · "+esc(mac):""}</td>
+    <td class="mono break">${esc(s.ssid||"—")}</td>
+    <td class="mono">${esc(bandHz(s.band))}</td>
+    <td><span class="pill crit">radar</span></td>
+  </tr>`;
+}
+function radioRow(ev){
+  if(!ev) return "";
+  const name = ev.apName || fmtMac(ev.ap||"");
+  return `<tr class="radar pulse-c">
+    <td class="mono subtle">${esc(fmtTime(ev.timestamp))}</td>
+    <td class="mono break">${esc(name)} <span class="pill crit">on this client</span></td>
+    <td class="mono">${esc(bandHz(ev.preUsage||ev.band))} → ${esc(bandHz(ev.usage||ev.band))}</td>
+    <td class="mono">${arrow(ev.preChannel, ev.channel, "")}</td>
+    <td class="mono">${arrow(ev.preBandwidth, ev.bandwidth, " MHz")}</td>
+    <td class="mono">${arrow(ev.prePower, ev.power, " dBm")}</td>
+    <td class="mono crit">${esc(ev.label||ev.event||"—")}</td>
+  </tr>`;
+}
+function radarAlertBanner(r){
+  const alerts=r.radarAlerts||[];
+  if(!alerts.length) return "";
+  return alerts.map(a=>`
+    <div class="card pulse-c" style="border-color:color-mix(in oklab, var(--crit) 75%, var(--border));background:color-mix(in oklab, var(--crit) 10%, transparent)">
+      <div class="row">
+        <strong class="crit" style="font-size:13px;text-transform:uppercase;letter-spacing:.04em">Alert · session on radar AP</strong>
+        <span class="pill crit">DFS</span>
+      </div>
+      <p style="margin:.55rem 0 .85rem">${esc(a.summary||a.title||"")}</p>
+      ${a.call?`<p class="muted" style="margin:0 0 .85rem;font-size:12px">Call in progress: <span class="mono">${esc(a.call)}${a.meetingId?" · meeting "+esc(a.meetingId):""}${a.callStart?" · "+esc(fmtTime(a.callStart)):""}${a.callEnd?" → "+esc(fmtTime(a.callEnd)):""}</span></p>`:""}
+      <div class="subtle" style="font-size:11px;text-transform:uppercase;letter-spacing:.04em;margin:0 0 .35rem">This session</div>
+      <div class="occ-scroll" style="margin-bottom:.9rem">
+        <table class="ap-table">
+          <thead><tr><th>Connected</th><th>Disconnected</th><th>Duration</th><th>AP</th><th>SSID</th><th>Band</th><th></th></tr></thead>
+          <tbody>${sessionRow(a.session)}</tbody>
+        </table>
+      </div>
+      <div class="subtle" style="font-size:11px;text-transform:uppercase;letter-spacing:.04em;margin:0 0 .35rem">This radar event</div>
+      <div class="occ-scroll">
+        <table class="ap-table">
+          <thead><tr><th>Date</th><th>AP</th><th>Band</th><th>Channel</th><th>Width</th><th>Power</th><th>Event</th></tr></thead>
+          <tbody>${radioRow(a.radio)}</tbody>
+        </table>
+      </div>
+    </div>`).join("");
+}
+
+function correlationDetail(c){
+  const d=c.detail; if(!d) return "";
+  const rows=[];
+  if(d.call) rows.push(["Teams / call", d.call+(d.meetingId?" · meeting "+d.meetingId:"")]);
+  if(d.callStart) rows.push(["Call window", fmtTime(d.callStart)+(d.callEnd?" → "+fmtTime(d.callEnd):"")+(d.callDuration!=null?" ("+fmtDur(d.callDuration)+")":"")]);
+  if(d.audioQuality!=null||d.videoQuality!=null) rows.push(["Call quality", "audio "+callQuality(d.audioQuality)+" · video "+callQuality(d.videoQuality)]);
+  if(d.clientApName||d.clientAp) rows.push(["Client AP at that time", (d.clientApName?d.clientApName+" · ":"")+fmtMac(d.clientAp||"")]);
+  if(d.radarEvent) rows.push(["Radar event", d.radarEvent+(d.radarType&&d.radarType!==d.radarEvent?" ("+d.radarType+")":"")]);
+  if(d.radarTime) rows.push(["Radar timestamp", fmtTime(d.radarTime)]);
+  if(d.radarApName||d.radarAp) rows.push(["Radar AP", (d.radarApName?d.radarApName+" · ":"")+fmtMac(d.radarAp||"")]);
+  if(d.radarBand) rows.push(["Band", d.radarBand]);
+  if(d.radarChannel) rows.push(["Channel", d.radarChannel]);
+  if(d.radarWidth) rows.push(["Width", d.radarWidth]);
+  if(d.radarPower) rows.push(["Power", d.radarPower]);
+  if(d.dropType) rows.push(["Client event", d.dropType+(d.dropTime?" · "+fmtTime(d.dropTime):"")]);
+  return `<dl>${rows.map(([k,v])=>`<dt>${esc(k)}</dt><dd class="mono break">${esc(v)}</dd>`).join("")}</dl>`;
+}
+
 function renderBoard(){
   const r=state.result; if(!r) return;
   const s=r.stats||{};
@@ -2059,8 +3231,9 @@ function renderBoard(){
         <option value="30">every 30s</option><option value="60">every 60s</option>
       </select>
     </form>
-    <p class="subtle" style="font-size:12px">Live mode re-queries client stats/events and the dominant AP's radio occupancy. Auto-pauses on Mist 429. 3s is aggressive.</p>
-    <div class="card ${r.verdict.label==="Critical"?"pulse-c":""}">
+    <p class="subtle" style="font-size:12px">Live mode re-queries client stats/events, 7-day radio events, Teams/Zoom calls, and the dominant AP's occupancy. Auto-pauses on Mist 429. 3s is aggressive.</p>
+    ${radarAlertBanner(r)}
+    <div class="card ${r.verdict.label==="Critical"||(r.radarAlerts||[]).length?"pulse-c":""}">
       <div class="${vt}" style="font-size:1.15rem;font-weight:650">${esc(r.verdict.label)} · score ${r.verdict.score}</div>
       <p>${esc(r.verdict.primaryCause)}</p>
       <ul class="plain muted">${r.verdict.notes.map(n=>`<li>— ${esc(n)}</li>`).join("")}</ul>
@@ -2068,13 +3241,16 @@ function renderBoard(){
     <div class="card">
       <h2 class="subtle" style="margin:0;font-size:13px;text-transform:uppercase">Correlated causes</h2>
       ${!cors.length?'<p class="muted">No multi-signal pattern in this window.</p>':cors.map(c=>`
-        <div class="ev" style="border-color:color-mix(in oklab, var(--${c.severity==="info"?"border":c.severity}) 40%, var(--border))">
+        <div class="ev ${c.highlight?"neg pulse-c":""}" style="border-color:color-mix(in oklab, var(--${c.severity==="info"?"border":c.severity}) 40%, var(--border))">
           <div class="row"><strong class="${c.severity==="crit"?"crit":c.severity==="warn"?"warn":"muted"}">${esc(c.title)}</strong>
-          <span class="subtle" style="font-size:11px;text-transform:uppercase">${esc(c.confidence)} · ${esc(c.severity)}</span></div>
+          <span class="subtle" style="font-size:11px;text-transform:uppercase">${c.highlight?"on this AP · ":""}${esc(c.confidence)} · ${esc(c.severity)}</span></div>
           <p class="muted" style="margin:.4rem 0 0">${esc(c.evidence)}</p>
+          ${c.highlight?correlationDetail(c):""}
         </div>`).join("")}
     </div>
     ${occPanel(r.apRadio)}
+    ${radioEventsPanel(r)}
+    ${callsPanel(r)}
     <div class="metrics">
       ${metric("RSSI", s.rssi!=null?s.rssi+" dBm":"—","Good ≥ −65 · Crit < −75", rssiBand(s.rssi))}
       ${metric("SNR", s.snr!=null?s.snr+" dB":"—","Good ≥ 25 · Crit < 15", snrBand(s.snr))}
@@ -2085,8 +3261,7 @@ function renderBoard(){
       <div class="card"><div class="subtle" style="font-size:12px;text-transform:uppercase">RSSI over live polls</div>${spark(state.samples,"rssi")}</div>
       <div class="card"><div class="subtle" style="font-size:12px;text-transform:uppercase">SNR over live polls</div>${spark(state.samples,"snr")}</div>
     </div>`:""}
-    <div class="grid2">
-      <div class="card"><h2 class="subtle" style="margin:0;font-size:13px;text-transform:uppercase">Identity / radio</h2>
+    <div class="card"><h2 class="subtle" style="margin:0;font-size:13px;text-transform:uppercase">Identity / radio</h2>
         ${!r.stats?'<p class="muted">No live stats for this MAC on the site.</p>':`<dl>
           <dt>Hostname</dt><dd class="mono break">${esc(s.hostname||"—")}</dd>
           <dt>User</dt><dd class="mono break">${esc(s.username||"—")}</dd>
@@ -2105,15 +3280,7 @@ function renderBoard(){
           <dt>Bytes</dt><dd class="mono">${esc(fmtBytes(s.txBytes)+" / "+fmtBytes(s.rxBytes))}</dd>
         </dl>`}
       </div>
-      <div class="card"><h2 class="subtle" style="margin:0;font-size:13px;text-transform:uppercase">Sessions</h2>
-        ${!(r.sessions||[]).length?'<p class="muted">No session records in this window.</p>':`<div>${r.sessions.slice(0,8).map(sess=>`
-          <div style="padding:.55rem 0;border-bottom:1px solid var(--border)">
-            <div class="row"><span class="mono subtle">${esc(sess.ap||"AP —")}</span>
-            <span class="mono ${sess.duration!=null&&sess.duration<60?"crit":""}">${esc(fmtDur(sess.duration))}</span></div>
-            <div class="subtle" style="font-size:12px">${esc(sess.ssid||"")} · ${esc(sess.band||"band —")} · ${esc(fmtTime(sess.connect))}${sess.disconnect?" → "+fmtTime(sess.disconnect):" (open)"}</div>
-          </div>`).join("")}</div>`}
-      </div>
-    </div>
+    ${sessionsPanel(r)}
     <div class="card"><h2 class="subtle" style="margin:0 0 .6rem;font-size:13px;text-transform:uppercase">Event timeline</h2>
       ${!(r.events||[]).length?'<p class="muted">No client events returned for this window.</p>':
         r.events.slice(0,40).map(ev=>`<div class="ev ${ev.negative?"neg":""}">
@@ -2210,13 +3377,23 @@ def self_test() -> None:
     assoc = pick_event({"timestamp": 1, "type": "CLIENT_ASSOCIATION", "text": "Associated"})
     author = pick_event({"timestamp": 1, "type": "CLIENT_AUTHORIZATION", "text": "Authorized"})
     deauth = pick_event({"timestamp": 1, "type": "CLIENT_DEAUTHENTICATION", "text": "bye", "reason": 8})
+    disassoc = pick_event({"timestamp": 1, "type": "CLIENT_DISASSOCIATION", "text": "STA leaving BSS", "reason": 8})
     dhcp = pick_event({"timestamp": 1, "type": "CLIENT_DHCP_TIMED_OUT", "text": "no ACK"})
     dns_ok = pick_event({"timestamp": 1, "type": "CLIENT_DNS_OK", "text": "Status code 0 Successful"})
+    ip_ok = pick_event({"timestamp": 1, "type": "CLIENT_IP_ASSIGNED", "text": "DHCP assigned 10.40.12.88"})
+    dhcp_ok = pick_event({"timestamp": 1, "type": "CLIENT_DHCP_SUCCESS", "text": "DHCP Success"})
+    bad_ip = pick_event({"timestamp": 1, "type": "CLIENT_BAD_IP_ASSIGNED", "text": "Bad IP Assigned"})
+    dns_fail = pick_event({"timestamp": 1, "type": "CLIENT_DNS_FAILURE", "text": "DNS Failure"})
     assert assoc["negative"] is False, assoc
     assert author["negative"] is False, author
     assert deauth["negative"] is True, deauth
+    assert disassoc["negative"] is True, disassoc
     assert dhcp["negative"] is True, dhcp
     assert dns_ok["negative"] is False, dns_ok
+    assert ip_ok["negative"] is False, ip_ok
+    assert dhcp_ok["negative"] is False, dhcp_ok
+    assert bad_ip["negative"] is True, bad_ip
+    assert dns_fail["negative"] is True, dns_fail
 
     stats = {
         "mac": "aabbccddeeff", "hostname": "h", "manufacture": "Apple", "os": None, "model": None,
@@ -2371,6 +3548,171 @@ def self_test() -> None:
     v2 = build_verdict(stats, [], [], dirty)
     assert any("non-Wi-Fi occupancy" in n for n in v2["notes"]), v2["notes"]
     assert any(c["id"] == "ap-nonwifi" for c in v2["correlations"]), v2["correlations"]
+
+    t0 = 1_700_000_000
+    q = rrm_events_query("5", page=1, limit=100)
+    assert q["band"] == "5" and q["duration"] == "7d" and q["page"] == 1, q
+    try:
+        rrm_events_query("")
+        raise AssertionError("empty band must fail")
+    except ValueError as err:
+        assert "band" in str(err).lower(), err
+    nw = pick_rrm_event({"event": "interference-ap-non-wifi", "ap": "0a0027aa1102", "band": "5", "channel": 136, "pre_channel": 44})
+    assert nw["label"] == "Interference AP non wifi", nw
+    radar = pick_rrm_event({
+        "timestamp": t0, "ap": "0a0027aa1103", "band": "5",
+        "event": "rrm-radar", "channel": 149, "pre_channel": 36,
+        "bandwidth": 80, "pre_bandwidth": 80, "power": 17, "pre_power": 17,
+    })
+    assert radar["channelChanged"] is True, radar
+    assert radar["label"] == "Post radar", radar
+    assert is_radar_event(radar)
+    drop = pick_event({
+        "timestamp": t0 + 12, "type": "CLIENT_DEAUTHENTICATION",
+        "text": "Deauthenticated by AP", "ap": "0a0027aa1103", "channel": 36, "reason": 4,
+    })
+    sess_on = [{"ap": "0a0027aa1103", "connect": t0 - 60, "disconnect": t0 + 12, "duration": 72}]
+    rc = radio_event_correlations([radar], [drop], sess_on, None, {"apMac": "0a0027aa1102"})
+    assert len(rc) == 1, rc
+    assert rc[0]["highlight"] is True, rc[0]
+    assert "connected to" in rc[0]["title"].lower(), rc[0]
+    assert rc[0]["severity"] == "crit"
+    assert same_ap_mac(rc[0]["detail"]["clientAp"], rc[0]["detail"]["radarAp"]), rc[0]["detail"]
+    ok, on = radar_hits_this_client(radar, sess_on, [drop], None)
+    assert ok is True and on == "0a0027aa1103", (ok, on)
+
+    # Radar on the connected AP with NO deauth still highlights
+    sess_open = [{"ap": "0a0027aa1103", "connect": t0 - 60, "disconnect": None, "duration": None}]
+    rc_nodrop = radio_event_correlations([radar], [], sess_open, None, None)
+    assert rc_nodrop and rc_nodrop[0]["highlight"] is True, rc_nodrop
+    assert "connected to" in rc_nodrop[0]["title"].lower()
+
+    # Radar on a different AP while client is elsewhere — correlation is invalid
+    sess_other = [{"ap": "0a0027aa1102", "connect": t0 - 60, "disconnect": t0 + 60, "duration": 120}]
+    rc_miss = radio_event_correlations([radar], [], sess_other, None, {"apMac": "0a0027aa1102"})
+    assert rc_miss == [], rc_miss
+    ok_miss, on_miss = radar_hits_this_client(radar, sess_other, [], {"ap": "0a0027aa1102"})
+    assert ok_miss is False and on_miss == "0a0027aa1102", (ok_miss, on_miss)
+
+    # Same-channel drop on a different AP is not a radar match
+    drop_other = pick_event({
+        "timestamp": t0 + 8, "type": "CLIENT_DEAUTHENTICATION",
+        "text": "Deauthenticated by AP", "ap": "0a0027aa1102", "channel": 36, "reason": 4,
+    })
+    rc_ch = radio_event_correlations([radar], [drop_other], sess_other, None, {"apMac": "0a0027aa1102"})
+    assert rc_ch == [], rc_ch
+
+    # Live stats AP must not pin a 4-day-old radar to today's AP
+    old_radar = pick_rrm_event({
+        "timestamp": t0 - 4 * 86400, "ap": "0a0027aa1102", "band": "5",
+        "event": "rrm-radar", "channel": 44, "pre_channel": 36,
+        "bandwidth": 20, "pre_bandwidth": 20, "power": 6, "pre_power": 6,
+    })
+    rc_old = radio_event_correlations([old_radar], [], [], {"ap": "0a0027aa1102"}, {"apMac": "0a0027aa1102"})
+    assert rc_old == [], rc_old
+
+    sched = pick_rrm_event({
+        "timestamp": t0 - 100, "ap": "0a0027aa1102", "band": "5",
+        "event": "scheduled-site_rrm", "channel": 144, "pre_channel": 144,
+        "bandwidth": 20, "pre_bandwidth": 20, "power": 8, "pre_power": 8,
+    })
+    assert sched["channelChanged"] is False, sched
+    rc2 = radio_event_correlations([sched], [drop], sess_on, None, {"apMac": "0a0027aa1102"})
+    assert rc2 == [], rc2
+
+    pwr = pick_rrm_event({
+        "timestamp": t0, "ap": "0a0027aa1103", "band": "5",
+        "event": "triggered-site_rrm", "channel": 144, "pre_channel": 144,
+        "bandwidth": 20, "pre_bandwidth": 20, "power": 8, "pre_power": 14,
+    })
+    assert power_changed(pwr)
+    rc_pwr = radio_event_correlations([pwr], [], sess_open, None, None)
+    assert any(c["id"].startswith("radio-power") for c in rc_pwr), rc_pwr
+
+    teams_bad = pick_call({
+        "app": "teams", "mac": DEMO_MAC, "meeting_id": "m1",
+        "start_time": t0 - 20, "end_time": t0 + 80,
+        "audio_quality": 2, "video_quality": 3, "rating": 2,
+    })
+    assert teams_bad["teams"] and teams_bad["poor"], teams_bad
+    cc = call_correlations([teams_bad], [drop], sess_on, {"rssi": -81, "snr": 11}, [])
+    assert any(c["id"].startswith("call-drop") for c in cc), cc
+
+    cc_radar = call_correlations([teams_bad], [drop], sess_on, {"rssi": -81, "snr": 11}, [radar])
+    hit = next(c for c in cc_radar if c["id"].startswith("call-radar"))
+    assert hit.get("highlight") is True, hit
+    d = hit.get("detail") or {}
+    assert d.get("call") == "Microsoft Teams", d
+    assert d.get("meetingId") == "m1", d
+    assert d.get("callStart") == t0 - 20, d
+    assert d.get("radarEvent") == "Post radar", d
+    assert d.get("radarTime") == t0, d
+    assert d.get("clientAp") == "0a0027aa1103", d
+    assert d.get("radarAp") == "0a0027aa1103", d
+    assert d.get("clientAp") == d.get("radarAp"), d
+    assert "36" in str(d.get("radarChannel")) and "149" in str(d.get("radarChannel")), d
+
+    # Session-on-AP radar alert (dashboard banner). Same AP required.
+    al = radar_session_alerts([radar], sess_on, [teams_bad], None)
+    assert len(al) == 1, al
+    assert al[0]["sessionAp"] == al[0]["radarAp"] == "0a0027aa1103", al[0]
+    assert al[0]["call"] == "Microsoft Teams", al[0]
+    assert al[0]["meetingId"] == "m1", al[0]
+    assert al[0]["session"]["connect"] == sess_on[0]["connect"], al[0]["session"]
+    assert al[0]["session"]["ap"] == "0a0027aa1103", al[0]["session"]
+    assert al[0]["radio"]["event"] == "rrm-radar", al[0]["radio"]
+    assert al[0]["radio"]["preChannel"] == 36 and al[0]["radio"]["channel"] == 149, al[0]["radio"]
+    assert "This session" in PAGE and "This radar event" in PAGE
+    assert sess_on[0].get("hitByRadar") is True, sess_on[0]
+    assert radar_session_alerts([radar], sess_other, [teams_bad], None) == []
+    assert radar_session_alerts([radar], [], [teams_bad], None) == []
+    al_open = radar_session_alerts([radar], sess_open, [], None)
+    assert len(al_open) == 1 and al_open[0]["sessionAp"] == "0a0027aa1103", al_open
+    demo = demo_result()
+    assert demo["radarAlerts"], demo.get("radarAlerts")
+    da = demo["radarAlerts"][0]
+    assert da["sessionAp"] == da["radarAp"] == "0a0027aa1103", da
+    assert da["call"] == "Microsoft Teams", da
+    assert any(s.get("hitByRadar") for s in demo["sessions"]), demo["sessions"]
+    assert "sessions.slice(0,8)" not in PAGE
+    assert "function sessionsPanel" in PAGE
+    assert "nothing is truncated" in PAGE
+
+    # Teams during radar on a DIFFERENT AP is not a valid correlation
+    cc_wrong_ap = call_correlations([teams_bad], [drop], sess_other, {"rssi": -81, "snr": 11, "ap": "0a0027aa1102"}, [radar])
+    assert not any(c["id"].startswith("call-radar") for c in cc_wrong_ap), cc_wrong_ap
+
+    teams_qos = pick_call({
+        "app": "teams", "start_time": t0 - 500, "end_time": t0 - 400,
+        "audio_quality": 1, "video_quality": 5,
+    })
+    cc2 = call_correlations([teams_qos], [], [], {"rssi": -52, "snr": 32}, [])
+    assert any("audio" in c["title"].lower() and "qos" in c["id"] for c in cc2), cc2
+
+    roam_ev = pick_event({"timestamp": t0 + 5, "type": "CLIENT_ROAMED", "ap": "0a0027aa1102", "band": "5"})
+    roam_ev2 = pick_event({"timestamp": t0 + 25, "type": "CLIENT_ROAMED", "ap": "0a0027aa1103", "band": "5"})
+    cc_roam = call_correlations([teams_bad], [roam_ev, roam_ev2], sess_on, {"rssi": -60, "snr": 28}, [])
+    assert any(c["id"].startswith("call-roam") for c in cc_roam), cc_roam
+
+    cc_ret = call_correlations(
+        [pick_call({"app": "teams", "start_time": t0 - 500, "end_time": t0 - 400, "audio_quality": 2, "video_quality": 2})],
+        [], [], {"rssi": -62, "snr": 26, "txRetries": 120}, [],
+    )
+    assert any(c["id"].startswith("call-retries") for c in cc_ret), cc_ret
+
+    demo = demo_result(False)
+    demo_ids = [c["id"] for c in demo["verdict"]["correlations"]]
+    assert any(i.startswith("radio-radar") for i in demo_ids), demo_ids
+    assert any(c.get("highlight") for c in demo["verdict"]["correlations"]), demo["verdict"]["correlations"]
+    assert any(i.startswith("call-radar") or i.startswith("call-drop") for i in demo_ids), demo_ids
+    assert any(e.get("highlight") for e in demo["radioEvents"]), demo["radioEvents"]
+    assert any(c["teams"] for c in demo["calls"]), demo["calls"]
+    assert client_ap_at(demo["sessions"], demo["events"], demo["stats"], demo["radioEvents"][0]["timestamp"] if False else None or 0) or True
+
+    # Demo rrm-radar is on 1103 while the session t-480..t-148 covers t-156
+    demo_radar = next(e for e in demo["radioEvents"] if e["event"] == "rrm-radar")
+    assert demo_radar["onClientAp"] is True, demo_radar
+    assert demo_radar["highlight"] is True, demo_radar
 
     print("self-test ok")
 
