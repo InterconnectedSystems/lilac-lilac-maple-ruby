@@ -36,25 +36,6 @@ It opens `http://127.0.0.1:8765/`. Ctrl+C stops the server. The API token is sen
 python3 mist_disconnect_console.py --self-test
 ```
 
----
-
-## Install and run (web)
-
-```bash
-git clone https://github.com/InterconnectedSystems/lilac-lilac-maple-ruby.git
-cd lilac-lilac-maple-ruby
-npm install
-npm run dev
-```
-
-Open the URL Vite prints (default `http://127.0.0.1:8080/`). Click **Run sample investigation**, or paste an Observer token and diagnose a real MAC.
-
-```bash
-npm test          # occupancy + correlation unit tests
-npx tsc --noEmit  # typecheck
-```
-
----
 
 ## Screenshots
 
