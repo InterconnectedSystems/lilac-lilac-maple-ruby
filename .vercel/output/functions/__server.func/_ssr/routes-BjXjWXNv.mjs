@@ -42,20 +42,20 @@ var mistDiagnose = createServerFn({ method: "POST" }).validator(creds.extend({
 	])
 })).handler(createSsrRpc("f14837cc7d50bd2bc49c6433a5b7809c549e88bbb483ffc035eaba246ed4c847"));
 var now = () => Math.floor(Date.now() / 1e3);
-var DEMO_MAC = "a483e7129c4b";
+var DEMO_MAC = "0a0027c1e001";
 function buildDemoResult(opts) {
 	const t = now();
 	const jitter = opts?.jitter ? Math.round((Math.random() - .5) * 6) : 0;
 	const stats = {
 		mac: DEMO_MAC,
-		hostname: "VALERIE-MBP",
+		hostname: "DEMO-MBP",
 		manufacture: "Apple",
 		os: "macOS 15.5",
 		model: "MacBookPro18,3",
 		ssid: "CORP-WIFI",
 		vlan: 40,
 		ip: "10.40.12.88",
-		ap: "5c5b350eb31b",
+		ap: "0a0027aa1102",
 		band: "5",
 		channel: 149,
 		proto: "ax",
@@ -67,7 +67,7 @@ function buildDemoResult(opts) {
 		lastSeen: t - 12,
 		txBytes: 1843200,
 		rxBytes: 9216e3,
-		username: "vcowan",
+		username: "demo.user",
 		keyMgmt: "WPA2-PSK",
 		txRetries: 214,
 		rxRetries: 88,
@@ -78,7 +78,7 @@ function buildDemoResult(opts) {
 			timestamp: t - 40,
 			type: "CLIENT_DNS_OK",
 			text: "Status code 0 Successful",
-			ap: "5c5b350eb31b",
+			ap: "0a0027aa1102",
 			ssid: "CORP-WIFI",
 			band: "5",
 			channel: 149,
@@ -89,7 +89,7 @@ function buildDemoResult(opts) {
 			timestamp: t - 90,
 			type: "CLIENT_DHCP_TIMED_OUT",
 			text: "DORA incomplete — no ACK",
-			ap: "5c5b350eb31b",
+			ap: "0a0027aa1102",
 			ssid: "CORP-WIFI",
 			band: "5",
 			channel: 149,
@@ -100,7 +100,7 @@ function buildDemoResult(opts) {
 			timestamp: t - 140,
 			type: "CLIENT_ASSOCIATION",
 			text: "Associated",
-			ap: "5c5b350eb31b",
+			ap: "0a0027aa1102",
 			ssid: "CORP-WIFI",
 			band: "5",
 			channel: 149,
@@ -111,7 +111,7 @@ function buildDemoResult(opts) {
 			timestamp: t - 148,
 			type: "CLIENT_DEAUTHENTICATION",
 			text: "Deauthenticated by AP",
-			ap: "5c5b350a4412",
+			ap: "0a0027aa1103",
 			ssid: "CORP-WIFI",
 			band: "5",
 			channel: 36,
@@ -122,7 +122,7 @@ function buildDemoResult(opts) {
 			timestamp: t - 420,
 			type: "CLIENT_DEAUTHENTICATION",
 			text: "4-way handshake timeout",
-			ap: "5c5b350a4412",
+			ap: "0a0027aa1103",
 			ssid: "CORP-WIFI",
 			band: "5",
 			channel: 36,
@@ -132,8 +132,8 @@ function buildDemoResult(opts) {
 		{
 			timestamp: t - 900,
 			type: "CLIENT_ROAMED",
-			text: "Roamed from 5c5b350a4412",
-			ap: "5c5b350eb31b",
+			text: "Roamed from 0a0027aa1103",
+			ap: "0a0027aa1102",
 			ssid: "CORP-WIFI",
 			band: "5",
 			channel: 149,
@@ -144,7 +144,7 @@ function buildDemoResult(opts) {
 			timestamp: t - 1800,
 			type: "CLIENT_AUTHORIZATION",
 			text: "Authorized",
-			ap: "5c5b350a4412",
+			ap: "0a0027aa1103",
 			ssid: "CORP-WIFI",
 			band: "5",
 			channel: 36,
@@ -155,7 +155,7 @@ function buildDemoResult(opts) {
 			timestamp: t - 3600,
 			type: "CLIENT_DISASSOCIATION",
 			text: "STA leaving BSS",
-			ap: "5c5b350a4412",
+			ap: "0a0027aa1103",
 			ssid: "CORP-WIFI",
 			band: "2.4",
 			channel: 11,
@@ -165,7 +165,7 @@ function buildDemoResult(opts) {
 	];
 	const sessions = [
 		{
-			ap: "5c5b350eb31b",
+			ap: "0a0027aa1102",
 			ssid: "CORP-WIFI",
 			band: "5",
 			connect: t - 214,
@@ -173,7 +173,7 @@ function buildDemoResult(opts) {
 			duration: 214
 		},
 		{
-			ap: "5c5b350a4412",
+			ap: "0a0027aa1103",
 			ssid: "CORP-WIFI",
 			band: "5",
 			connect: t - 480,
@@ -181,7 +181,7 @@ function buildDemoResult(opts) {
 			duration: 28
 		},
 		{
-			ap: "5c5b350a4412",
+			ap: "0a0027aa1103",
 			ssid: "CORP-WIFI",
 			band: "5",
 			connect: t - 900,
@@ -189,7 +189,7 @@ function buildDemoResult(opts) {
 			duration: 44
 		},
 		{
-			ap: "5c5b350eb31b",
+			ap: "0a0027aa1102",
 			ssid: "CORP-WIFI",
 			band: "5",
 			connect: t - 7200,
@@ -202,7 +202,7 @@ function buildDemoResult(opts) {
 		host: "api.gc2.mist.com",
 		orgId: "demo-org",
 		siteId: "demo-site",
-		siteName: "Barrie HQ — Floor 2",
+		siteName: "Sample HQ — Floor 2",
 		mac: DEMO_MAC,
 		duration: "1d",
 		online: true,
@@ -212,9 +212,9 @@ function buildDemoResult(opts) {
 		sessions,
 		marvisText: JSON.stringify({
 			category: "Wireless connectivity",
-			reason: "Weak RSSI and handshake timeouts on AP 5c5b350a4412",
+			reason: "Weak RSSI and handshake timeouts on AP 0a0027aa1103",
 			description: "Client repeatedly deauthenticates (reason 4 inactivity, reason 15 4-way timeout) then reassociates on a farther AP with RSSI −81 dBm and SNR 11 dB.",
-			recommendation: "Check AP 5c5b350a4412 radio / channel 36, verify PSK, and add coverage toward the client’s last location. DHCP timeouts after rejoin suggest the client is also struggling L3 on the new AP."
+			recommendation: "Check AP 0a0027aa1103 radio / channel 36, verify PSK, and add coverage toward the client’s last location. DHCP timeouts after rejoin suggest the client is also struggling L3 on the new AP."
 		}, null, 2),
 		marvisUnavailable: false,
 		verdict: buildVerdict(stats, events, sessions),
@@ -436,7 +436,7 @@ function ConsoleApp() {
 		setOrgId("demo-org");
 		setSites([{
 			id: "demo-site",
-			name: "Barrie HQ — Floor 2"
+			name: "Sample HQ — Floor 2"
 		}]);
 		setSiteId("demo-site");
 		setMac(formatMac(DEMO_MAC));

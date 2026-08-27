@@ -39,7 +39,7 @@ MIST_HOSTS = (
     "api.gc5.mist.com",
 )
 TIMEOUT = 25
-DEMO_MAC = "a483e7129c4b"
+DEMO_MAC = "0a0027c1e001"
 WINDOW_DHCP_S = 120
 WINDOW_HANDSHAKE_S = 45
 WINDOW_CLUSTER_S = 300
@@ -1519,14 +1519,14 @@ def demo_result(jitter: bool = False) -> dict:
     j = int((__import__("random").random() - 0.5) * 6) if jitter else 0
     stats = {
         "mac": DEMO_MAC,
-        "hostname": "VALERIE-MBP",
+        "hostname": "DEMO-MBP",
         "manufacture": "Apple",
         "os": "macOS 15.5",
         "model": "MacBookPro18,3",
         "ssid": "CORP-WIFI",
         "vlan": 40,
         "ip": "10.40.12.88",
-        "ap": "5c5b350eb31b",
+        "ap": "0a0027aa1102",
         "band": "5",
         "channel": 149,
         "proto": "ax",
@@ -1538,38 +1538,38 @@ def demo_result(jitter: bool = False) -> dict:
         "lastSeen": t - 12,
         "txBytes": 1843200,
         "rxBytes": 9216000,
-        "username": "vcowan",
+        "username": "demo.user",
         "keyMgmt": "WPA2-PSK",
         "txRetries": 214,
         "rxRetries": 88,
         "dualBand": True,
     }
     events = [
-        pick_event({"timestamp": t - 40, "type": "CLIENT_DNS_OK", "text": "Status code 0 Successful", "ap": "5c5b350eb31b", "ssid": "CORP-WIFI", "band": "5", "channel": 149}),
-        pick_event({"timestamp": t - 90, "type": "CLIENT_DHCP_TIMED_OUT", "text": "DORA incomplete — no ACK", "ap": "5c5b350eb31b", "ssid": "CORP-WIFI", "band": "5", "channel": 149}),
-        pick_event({"timestamp": t - 140, "type": "CLIENT_ASSOCIATION", "text": "Associated", "ap": "5c5b350eb31b", "ssid": "CORP-WIFI", "band": "5", "channel": 149}),
-        pick_event({"timestamp": t - 148, "type": "CLIENT_DEAUTHENTICATION", "text": "Deauthenticated by AP", "ap": "5c5b350a4412", "ssid": "CORP-WIFI", "band": "5", "channel": 36, "reason": 4}),
-        pick_event({"timestamp": t - 420, "type": "CLIENT_DEAUTHENTICATION", "text": "4-way handshake timeout", "ap": "5c5b350a4412", "ssid": "CORP-WIFI", "band": "5", "channel": 36, "reason": 15}),
-        pick_event({"timestamp": t - 900, "type": "CLIENT_ROAMED", "text": "Roamed from 5c5b350a4412", "ap": "5c5b350eb31b", "ssid": "CORP-WIFI", "band": "5", "channel": 149}),
-        pick_event({"timestamp": t - 1800, "type": "CLIENT_AUTHORIZATION", "text": "Authorized", "ap": "5c5b350a4412", "ssid": "CORP-WIFI", "band": "5", "channel": 36}),
-        pick_event({"timestamp": t - 3600, "type": "CLIENT_DISASSOCIATION", "text": "STA leaving BSS", "ap": "5c5b350a4412", "ssid": "CORP-WIFI", "band": "2.4", "channel": 11, "reason": 8}),
+        pick_event({"timestamp": t - 40, "type": "CLIENT_DNS_OK", "text": "Status code 0 Successful", "ap": "0a0027aa1102", "ssid": "CORP-WIFI", "band": "5", "channel": 149}),
+        pick_event({"timestamp": t - 90, "type": "CLIENT_DHCP_TIMED_OUT", "text": "DORA incomplete — no ACK", "ap": "0a0027aa1102", "ssid": "CORP-WIFI", "band": "5", "channel": 149}),
+        pick_event({"timestamp": t - 140, "type": "CLIENT_ASSOCIATION", "text": "Associated", "ap": "0a0027aa1102", "ssid": "CORP-WIFI", "band": "5", "channel": 149}),
+        pick_event({"timestamp": t - 148, "type": "CLIENT_DEAUTHENTICATION", "text": "Deauthenticated by AP", "ap": "0a0027aa1103", "ssid": "CORP-WIFI", "band": "5", "channel": 36, "reason": 4}),
+        pick_event({"timestamp": t - 420, "type": "CLIENT_DEAUTHENTICATION", "text": "4-way handshake timeout", "ap": "0a0027aa1103", "ssid": "CORP-WIFI", "band": "5", "channel": 36, "reason": 15}),
+        pick_event({"timestamp": t - 900, "type": "CLIENT_ROAMED", "text": "Roamed from 0a0027aa1103", "ap": "0a0027aa1102", "ssid": "CORP-WIFI", "band": "5", "channel": 149}),
+        pick_event({"timestamp": t - 1800, "type": "CLIENT_AUTHORIZATION", "text": "Authorized", "ap": "0a0027aa1103", "ssid": "CORP-WIFI", "band": "5", "channel": 36}),
+        pick_event({"timestamp": t - 3600, "type": "CLIENT_DISASSOCIATION", "text": "STA leaving BSS", "ap": "0a0027aa1103", "ssid": "CORP-WIFI", "band": "2.4", "channel": 11, "reason": 8}),
     ]
     sessions = [
-        {"ap": "5c5b350eb31b", "ssid": "CORP-WIFI", "band": "5", "connect": t - 214, "disconnect": None, "duration": 214},
-        {"ap": "5c5b350a4412", "ssid": "CORP-WIFI", "band": "5", "connect": t - 480, "disconnect": t - 148, "duration": 28},
-        {"ap": "5c5b350a4412", "ssid": "CORP-WIFI", "band": "5", "connect": t - 900, "disconnect": t - 840, "duration": 44},
-        {"ap": "5c5b350eb31b", "ssid": "CORP-WIFI", "band": "5", "connect": t - 7200, "disconnect": t - 3600, "duration": 3580},
+        {"ap": "0a0027aa1102", "ssid": "CORP-WIFI", "band": "5", "connect": t - 214, "disconnect": None, "duration": 214},
+        {"ap": "0a0027aa1103", "ssid": "CORP-WIFI", "band": "5", "connect": t - 480, "disconnect": t - 148, "duration": 28},
+        {"ap": "0a0027aa1103", "ssid": "CORP-WIFI", "band": "5", "connect": t - 900, "disconnect": t - 840, "duration": 44},
+        {"ap": "0a0027aa1102", "ssid": "CORP-WIFI", "band": "5", "connect": t - 7200, "disconnect": t - 3600, "duration": 3580},
     ]
     marvis = {
         "results": [
             {
                 "category": "Device Health",
-                "text": " The AP is currently online. Client VALERIE-MBP was connected to MISS688-AP-F1-eb:31:1b most of the time.",
+                "text": " The AP is currently online. Client DEMO-MBP was connected to DEMO-AP-F2-aa:11:02 most of the time.",
                 "site_id": "demo-site",
             },
             {
                 "category": "Wireless connectivity",
-                "text": "Weak RSSI and handshake timeouts on AP 5c5b350a4412. Client repeatedly deauthenticates then reassociates.",
+                "text": "Weak RSSI and handshake timeouts on AP 0a0027aa1103. Client repeatedly deauthenticates then reassociates.",
             },
         ],
         "start": t - 86400,
@@ -1593,17 +1593,17 @@ def demo_result(jitter: bool = False) -> dict:
         {"channel": 165, "site": 0, "external": 0, "nonWifi": 100, "serving": False},
     ]
     ap_radio = {
-        "apMac": "5c5b350eb31b",
-        "apName": "MISS688-AP-F1-eb:31:1b",
-        "deviceId": mist_device_id("5c5b350eb31b"),
+        "apMac": "0a0027aa1102",
+        "apName": "DEMO-AP-F2-aa:11:02",
+        "deviceId": mist_device_id("0a0027aa1102"),
         "status": "connected",
         "band": "5",
         "source": "marvis",
         "dwellSeconds": 3794,
         "dwellShare": 0.98,
         "marvisMentioned": True,
-        "marvisName": "MISS688-AP-F1-eb:31:1b",
-        "selectionNote": "Marvis named MISS688-AP-F1-eb:31:1b as the AP this client used most of the time. Chart is that radio (5c:5b:35:0e:b3:1b).",
+        "marvisName": "DEMO-AP-F2-aa:11:02",
+        "selectionNote": "Marvis named DEMO-AP-F2-aa:11:02 as the AP this client used most of the time. Chart is that radio (0a:00:27:aa:11:02).",
         "fallback": False,
         "scope": "ap",
         "unavailable": None,
@@ -1628,7 +1628,7 @@ def demo_result(jitter: bool = False) -> dict:
         "host": DEFAULT_HOST,
         "orgId": "demo-org",
         "siteId": "demo-site",
-        "siteName": "Barrie HQ — Floor 2",
+        "siteName": "Sample HQ — Floor 2",
         "mac": DEMO_MAC,
         "duration": "1d",
         "online": True,
@@ -1643,7 +1643,7 @@ def demo_result(jitter: bool = False) -> dict:
         "fetchedAt": int(time.time() * 1000),
         "email": "demo@local",
         "orgs": [{"id": "demo-org", "name": "Interconnected Systems (sample)"}],
-        "sites": [{"id": "demo-site", "name": "Barrie HQ — Floor 2"}],
+        "sites": [{"id": "demo-site", "name": "Sample HQ — Floor 2"}],
     }
 
 
@@ -2238,44 +2238,44 @@ def self_test() -> None:
     assert aliased["txRetries"] == 90, aliased
 
     demo_sessions = [
-        {"ap": "5c5b350eb31b", "ssid": "c", "band": "5", "connect": 1, "disconnect": None, "duration": 3794},
-        {"ap": "a8f7d9f096f0", "ssid": "c", "band": "5", "connect": 1, "disconnect": 2, "duration": 28},
+        {"ap": "0a0027aa1102", "ssid": "c", "band": "5", "connect": 1, "disconnect": None, "duration": 3794},
+        {"ap": "0a0027aa1101", "ssid": "c", "band": "5", "connect": 1, "disconnect": 2, "duration": 28},
     ]
     user_marvis = {
         "results": [{
             "category": "Device Health",
-            "text": " The AP is currently online. Client serv_tsc_wifi was connected to MISS688-AP-F1-f0:96:f0 most of the time.",
+            "text": " The AP is currently online. Client demo-client was connected to DEMO-AP-F2-aa:11:01 most of the time.",
             "site_id": "9885f682-0bcc-4a35-5645-6456546546456",
         }],
         "start": 1787763220,
         "end": 1787849620,
     }
     hints = parse_marvis_ap_hints(user_marvis)
-    assert hints["mostName"] == "MISS688-AP-F1-f0:96:f0", hints
+    assert hints["mostName"] == "DEMO-AP-F2-aa:11:01", hints
 
     inventory = [
-        {"id": "00000000-0000-0000-1000-a8f7d9f096f0", "name": "MISS688-AP-F1-f0:96:f0", "mac": "a8f7d9f096f0", "type": "ap"},
-        {"id": "00000000-0000-0000-1000-5c5b350eb31b", "name": "MISS688-AP-F1-eb:31:1b", "mac": "5c5b350eb31b", "type": "ap"},
+        {"id": "00000000-0000-0000-1000-0a0027aa1101", "name": "DEMO-AP-F2-aa:11:01", "mac": "0a0027aa1101", "type": "ap"},
+        {"id": "00000000-0000-0000-1000-0a0027aa1102", "name": "DEMO-AP-F2-aa:11:02", "mac": "0a0027aa1102", "type": "ap"},
     ]
     picked = pick_dominant_ap(demo_sessions, stats, [], user_marvis, inventory=inventory)
-    assert picked["apMac"] == "a8f7d9f096f0", picked
+    assert picked["apMac"] == "0a0027aa1101", picked
     assert picked["source"] == "marvis", picked
     assert picked["fallback"] is False, picked
-    assert "f0:96:f0" in (picked.get("apNameHint") or picked.get("marvisName") or ""), picked
+    assert "aa:11:01" in (picked.get("apNameHint") or picked.get("marvisName") or ""), picked
 
     # inventory name without colons still matches
-    inv_nocolon = [{"id": "x", "name": "MISS688-AP-F1-f096f0", "mac": "a8f7d9f096f0", "type": "ap"}]
+    inv_nocolon = [{"id": "x", "name": "DEMO-AP-F2-aa1101", "mac": "0a0027aa1101", "type": "ap"}]
     picked_nc = pick_dominant_ap(demo_sessions, stats, [], user_marvis, inventory=inv_nocolon)
-    assert picked_nc["apMac"] == "a8f7d9f096f0", picked_nc
+    assert picked_nc["apMac"] == "0a0027aa1101", picked_nc
 
     # MAC suffix in Marvis name matches inventory mac even if labels differ
-    inv_suf = [{"id": "x", "name": "MISS688-AP-F1", "mac": "a8f7d9f096f0", "type": "ap"}]
+    inv_suf = [{"id": "x", "name": "DEMO-AP-F2", "mac": "0a0027aa1101", "type": "ap"}]
     picked_suf = pick_dominant_ap(demo_sessions, stats, [], user_marvis, inventory=inv_suf)
-    assert picked_suf["apMac"] == "a8f7d9f096f0", picked_suf
+    assert picked_suf["apMac"] == "0a0027aa1101", picked_suf
 
     # no inventory → cannot resolve name to MAC → longest session + note
     picked_fb = pick_dominant_ap(demo_sessions, stats, [], user_marvis, inventory=[])
-    assert picked_fb["apMac"] == "5c5b350eb31b", picked_fb
+    assert picked_fb["apMac"] == "0a0027aa1102", picked_fb
     assert picked_fb["fallback"] is True, picked_fb
     assert "marvis named" in picked_fb["selectionNote"].lower(), picked_fb["selectionNote"]
 
@@ -2305,15 +2305,15 @@ def self_test() -> None:
     assert {int(r["channel"]) for r in keyed} == {100, 153}, keyed
 
     inv = [
-        {"mac": "a8f7d9f096f0", "type": "ap", "radio_stat": {"band_5": {
+        {"mac": "0a0027aa1101", "type": "ap", "radio_stat": {"band_5": {
             "channel": 144, "power": 8, "num_clients": 0, "util_all": 13,
             "util_tx": 1, "util_rx_in_bss": 8, "util_rx_other_bss": 0, "util_non_wifi": 0,
         }}},
-        {"mac": "a8f7d9f06dce", "type": "ap", "radio_stat": {"band_5": {
+        {"mac": "0a0027aa1104", "type": "ap", "radio_stat": {"band_5": {
             "channel": 157, "power": 8, "num_clients": 0, "util_all": 25,
             "util_tx": 4, "util_rx_in_bss": 16, "util_rx_other_bss": 3, "util_non_wifi": 0,
         }}},
-        {"mac": "a8f7d9f06fae", "type": "ap", "radio_stat": {"band_5": {
+        {"mac": "0a0027aa1105", "type": "ap", "radio_stat": {"band_5": {
             "channel": 108, "power": 8, "num_clients": 2, "util_all": 50,
             "util_tx": 10, "util_rx_in_bss": 37, "util_rx_other_bss": 2, "util_non_wifi": 1,
         }}},
@@ -2347,7 +2347,7 @@ def self_test() -> None:
     assert chs[144]["external"] == 0  # not radio_stat overlay
 
     ap_radio = {
-        "apMac": "5c5b350eb31b", "apName": "MISS688", "status": "connected",
+        "apMac": "0a0027aa1102", "apName": "DEMO-AP-F2", "status": "connected",
         "band": "5", "unavailable": None,
         "radio": {"channel": 144, "utilNonWifi": 0, "utilRxOtherBss": 0, "utilUnknownWifi": 0, "utilRxInBss": 9},
         "channels": [

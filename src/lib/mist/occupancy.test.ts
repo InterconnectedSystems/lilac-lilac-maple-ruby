@@ -44,7 +44,7 @@ test("rrm_rows_from keyed by channel", () => {
 test("inventory Site AP airtime fills orange bars; unknown wifi is teal", () => {
   const inv = [
     {
-      mac: "a8f7d9f096f0",
+      mac: "0a0027aa1101",
       type: "ap",
       radio_stat: {
         band_5: {
@@ -60,7 +60,7 @@ test("inventory Site AP airtime fills orange bars; unknown wifi is teal", () => 
       },
     },
     {
-      mac: "a8f7d9f06dce",
+      mac: "0a0027aa1104",
       type: "ap",
       radio_stat: {
         band_5: {
@@ -76,7 +76,7 @@ test("inventory Site AP airtime fills orange bars; unknown wifi is teal", () => 
       },
     },
     {
-      mac: "a8f7d9f06fae",
+      mac: "0a0027aa1105",
       type: "ap",
       radio_stat: {
         band_5: {
@@ -119,16 +119,16 @@ test("inventory Site AP airtime fills orange bars; unknown wifi is teal", () => 
 
 test("adjacent-channel non-wifi correlation uses occupancy serving bar", () => {
   const apRadio: ApRadio = {
-    apMac: "a8f7d9f096f0",
-    apName: "MISS688-AP-F1-f0:96:f0",
-    apNameHint: "MISS688-AP-F1-f0:96:f0",
+    apMac: "0a0027aa1101",
+    apName: "DEMO-AP-F2-aa:11:01",
+    apNameHint: "DEMO-AP-F2-aa:11:01",
     source: "marvis",
     dwellSeconds: 100,
     dwellShare: 1,
     bandHint: "5",
     marvisMentioned: true,
     marvisAps: [],
-    marvisName: "MISS688-AP-F1-f0:96:f0",
+    marvisName: "DEMO-AP-F2-aa:11:01",
     deviceId: "x",
     selectionNote: "Marvis",
     fallback: false,
@@ -164,18 +164,18 @@ test("Marvis 'connected to NAME most of the time' matches inventory suffix", () 
     results: [
       {
         category: "Device Health",
-        text: " The AP is currently online. Client serv_tsc_wifi was connected to MISS688-AP-F1-f0:96:f0 most of the time.",
+        text: " The AP is currently online. Client demo-client was connected to DEMO-AP-F2-aa:11:01 most of the time.",
       },
     ],
   };
   const hints = parseMarvisApHints(marvis);
-  assert.equal(hints.mostName, "MISS688-AP-F1-f0:96:f0");
-  const inv = [{ mac: "a8f7d9f096f0", name: "MISS688-AP-F1-f0:96:f0", type: "ap" }];
+  assert.equal(hints.mostName, "DEMO-AP-F2-aa:11:01");
+  const inv = [{ mac: "0a0027aa1101", name: "DEMO-AP-F2-aa:11:01", type: "ap" }];
   const hit = matchInventory(inv, { name: hints.mostName ?? "", text: hints.blob });
-  assert.equal(hexOf(hit?.mac), "a8f7d9f096f0");
+  assert.equal(hexOf(hit?.mac), "0a0027aa1101");
   const picked = pickDominantAp([], null, [], marvis, inv);
   assert.equal(picked.source, "marvis");
-  assert.equal(picked.apMac, "a8f7d9f096f0");
+  assert.equal(picked.apMac, "0a0027aa1101");
 });
 
 function hexOf(v: unknown): string {

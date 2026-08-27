@@ -10,7 +10,7 @@ Click **Run sample investigation** on the home page to walk the demo with no tok
 
 ## Screenshots
 
-Captured from the built-in sample investigation (Barrie HQ — Floor 2, client `a4:83:e7:12:9c:4b`).
+Captured from the built-in sample investigation (Sample HQ — Floor 2, client `0a:00:27:c1:e0:01`).
 
 ### Home — Observer token gate
 
@@ -52,7 +52,7 @@ Serving channel is **bold**. Bars flash when Non-Wi-Fi ≥ 30% or total occupanc
 
 | Client events | Marvis |
 |---|---|
-| ![Event timeline with DHCP timeout, deauth reason 4 inactivity, 4-way handshake timeout reason 15](screenshots/07-events.png) | ![Marvis text naming MISS688-AP-F1 as the AP the client used most of the time](screenshots/08-marvis.png) |
+| ![Event timeline with DHCP timeout, deauth reason 4 inactivity, 4-way handshake timeout reason 15](screenshots/07-events.png) | ![Marvis text naming DEMO-AP-F2 as the AP the client used most of the time](screenshots/08-marvis.png) |
 
 802.11 reason codes are decoded in place (`4` inactivity, `15` 4-way handshake timeout). Marvis `connected to <AP> most of the time` is matched to inventory (name, MAC suffix) so occupancy is pulled for that AP.
 
@@ -70,7 +70,7 @@ Serving channel is **bold**. Bars flash when Non-Wi-Fi ≥ 30% or total occupanc
 4. **Verdict** — Score + primary cause + notes, with correlated causes ranked by confidence.
 5. **Live monitor** — Re-query every 3 / 15 / 30 / 60 seconds (RSSI/SNR sparklines, occupancy included). Auto-pauses on Mist HTTP 429.
 
-The sample investigation is the same board with synthetic Barrie HQ data — use it to learn the layout before pointing at a real site.
+The sample investigation is the same board with synthetic Sample HQ data — use it to learn the layout before pointing at a real site.
 
 ---
 

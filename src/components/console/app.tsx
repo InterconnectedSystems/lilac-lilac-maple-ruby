@@ -200,7 +200,7 @@ export function ConsoleApp() {
     setEmail("demo@local");
     setOrgs([{ id: "demo-org", name: "Interconnected Systems (sample)" }]);
     setOrgId("demo-org");
-    setSites([{ id: "demo-site", name: "Barrie HQ — Floor 2" }]);
+    setSites([{ id: "demo-site", name: "Sample HQ — Floor 2" }]);
     setSiteId("demo-site");
     setMac(formatMac(DEMO_MAC));
     const demo = buildDemoResult();

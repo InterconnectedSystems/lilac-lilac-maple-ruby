@@ -3,21 +3,26 @@ import type { ApRadio, ClientEvent, ClientSession, ClientStats, DiagnoseResult }
 
 const now = () => Math.floor(Date.now() / 1000);
 
-export const DEMO_MAC = "a483e7129c4b";
+/** Locally-administered demo identifiers — not a real site or station. */
+export const DEMO_MAC = "0a0027c1e001";
+const AP_DWELL = "0a0027aa1101";
+const AP_CURRENT = "0a0027aa1102";
+const AP_PEER = "0a0027aa1103";
+const AP_DWELL_NAME = "DEMO-AP-F2-aa:11:01";
 
 export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
   const t = now();
   const jitter = opts?.jitter ? Math.round((Math.random() - 0.5) * 6) : 0;
   const stats: ClientStats = {
     mac: DEMO_MAC,
-    hostname: "VALERIE-MBP",
+    hostname: "DEMO-MBP",
     manufacture: "Apple",
     os: "macOS 15.5",
     model: "MacBookPro18,3",
     ssid: "CORP-WIFI",
     vlan: 40,
     ip: "10.40.12.88",
-    ap: "5c5b350eb31b",
+    ap: AP_CURRENT,
     band: "5",
     channel: 149,
     proto: "ax",
@@ -29,7 +34,7 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
     lastSeen: t - 12,
     txBytes: 1843200,
     rxBytes: 9216000,
-    username: "vcowan",
+    username: "demo.user",
     keyMgmt: "WPA2-PSK",
     txRetries: 214,
     rxRetries: 88,
@@ -41,7 +46,7 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
       timestamp: t - 40,
       type: "CLIENT_DNS_OK",
       text: "Status code 0 Successful",
-      ap: "5c5b350eb31b",
+      ap: AP_CURRENT,
       ssid: "CORP-WIFI",
       band: "5",
       channel: 149,
@@ -52,7 +57,7 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
       timestamp: t - 90,
       type: "CLIENT_DHCP_TIMED_OUT",
       text: "DORA incomplete — no ACK",
-      ap: "5c5b350eb31b",
+      ap: AP_CURRENT,
       ssid: "CORP-WIFI",
       band: "5",
       channel: 149,
@@ -63,7 +68,7 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
       timestamp: t - 140,
       type: "CLIENT_ASSOCIATION",
       text: "Associated",
-      ap: "5c5b350eb31b",
+      ap: AP_CURRENT,
       ssid: "CORP-WIFI",
       band: "5",
       channel: 149,
@@ -74,7 +79,7 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
       timestamp: t - 148,
       type: "CLIENT_DEAUTHENTICATION",
       text: "Deauthenticated by AP",
-      ap: "5c5b350a4412",
+      ap: AP_PEER,
       ssid: "CORP-WIFI",
       band: "5",
       channel: 36,
@@ -85,7 +90,7 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
       timestamp: t - 420,
       type: "CLIENT_DEAUTHENTICATION",
       text: "4-way handshake timeout",
-      ap: "5c5b350a4412",
+      ap: AP_PEER,
       ssid: "CORP-WIFI",
       band: "5",
       channel: 36,
@@ -95,8 +100,8 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
     {
       timestamp: t - 900,
       type: "CLIENT_ROAMED",
-      text: "Roamed from 5c5b350a4412",
-      ap: "5c5b350eb31b",
+      text: `Roamed from ${AP_PEER}`,
+      ap: AP_CURRENT,
       ssid: "CORP-WIFI",
       band: "5",
       channel: 149,
@@ -107,7 +112,7 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
       timestamp: t - 1800,
       type: "CLIENT_AUTHORIZATION",
       text: "Authorized",
-      ap: "5c5b350a4412",
+      ap: AP_PEER,
       ssid: "CORP-WIFI",
       band: "5",
       channel: 36,
@@ -118,7 +123,7 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
       timestamp: t - 3600,
       type: "CLIENT_DISASSOCIATION",
       text: "STA leaving BSS",
-      ap: "5c5b350a4412",
+      ap: AP_PEER,
       ssid: "CORP-WIFI",
       band: "2.4",
       channel: 11,
@@ -129,7 +134,7 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
 
   const sessions: ClientSession[] = [
     {
-      ap: "5c5b350eb31b",
+      ap: AP_CURRENT,
       ssid: "CORP-WIFI",
       band: "5",
       connect: t - 214,
@@ -137,7 +142,7 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
       duration: 214,
     },
     {
-      ap: "5c5b350a4412",
+      ap: AP_PEER,
       ssid: "CORP-WIFI",
       band: "5",
       connect: t - 480,
@@ -145,7 +150,7 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
       duration: 28,
     },
     {
-      ap: "5c5b350a4412",
+      ap: AP_PEER,
       ssid: "CORP-WIFI",
       band: "5",
       connect: t - 900,
@@ -153,7 +158,7 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
       duration: 44,
     },
     {
-      ap: "5c5b350eb31b",
+      ap: AP_DWELL,
       ssid: "CORP-WIFI",
       band: "5",
       connect: t - 7200,
@@ -164,19 +169,18 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
 
   const nwJ = opts?.jitter ? Math.max(0, Math.min(8, Math.round(Math.random() * 4))) : 0;
   const apRadio: ApRadio = {
-    apMac: "a8f7d9f096f0",
-    apName: "MISS688-AP-F1-f0:96:f0",
-    apNameHint: "MISS688-AP-F1-f0:96:f0",
+    apMac: AP_DWELL,
+    apName: AP_DWELL_NAME,
+    apNameHint: AP_DWELL_NAME,
     source: "marvis",
     dwellSeconds: 3580,
     dwellShare: 0.9,
     bandHint: "5",
     marvisMentioned: true,
-    marvisAps: ["a8f7d9f096f0"],
-    marvisName: "MISS688-AP-F1-f0:96:f0",
-    deviceId: "00000000-0000-0000-1000-a8f7d9f096f0",
-    selectionNote:
-      "Marvis named MISS688-AP-F1-f0:96:f0 as the AP this client used most of the time. Chart is that radio (a8:f7:d9:f0:96:f0).",
+    marvisAps: [AP_DWELL],
+    marvisName: AP_DWELL_NAME,
+    deviceId: `00000000-0000-0000-1000-${AP_DWELL}`,
+    selectionNote: `Marvis named ${AP_DWELL_NAME} as the AP this client used most of the time. Chart is that radio (0a:00:27:aa:11:01).`,
     fallback: false,
     status: "connected",
     band: "5",
@@ -218,7 +222,7 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
     host: "api.gc2.mist.com",
     orgId: "demo-org",
     siteId: "demo-site",
-    siteName: "Barrie HQ — Floor 2",
+    siteName: "Sample HQ — Floor 2",
     mac: DEMO_MAC,
     duration: "1d",
     online: true,
@@ -229,11 +233,9 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
     marvisText: JSON.stringify(
       {
         category: "Wireless connectivity",
-        reason: "Weak RSSI and handshake timeouts on AP 5c5b350a4412",
-        description:
-          " The AP is currently online. Client VALERIE-MBP was connected to MISS688-AP-F1-f0:96:f0 most of the time. Client repeatedly deauthenticates (reason 4 inactivity, reason 15 4-way timeout) then reassociates on a farther AP with RSSI −81 dBm and SNR 11 dB.",
-        recommendation:
-          "Check AP 5c5b350a4412 radio / channel 36, verify PSK, and add coverage toward the client’s last location. DHCP timeouts after rejoin suggest the client is also struggling L3 on the new AP.",
+        reason: `Weak RSSI and handshake timeouts on AP ${AP_PEER}`,
+        description: ` The AP is currently online. Client DEMO-MBP was connected to ${AP_DWELL_NAME} most of the time. Client repeatedly deauthenticates (reason 4 inactivity, reason 15 4-way timeout) then reassociates on a farther AP with RSSI −81 dBm and SNR 11 dB.`,
+        recommendation: `Check AP ${AP_PEER} radio / channel 36, verify PSK, and add coverage toward the client’s last location. DHCP timeouts after rejoin suggest the client is also struggling L3 on the new AP.`,
       },
       null,
       2,
