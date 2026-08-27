@@ -2,15 +2,63 @@
 
 Client disconnect RCA for **Juniper Mist**. Paste an Observer (read-only) API token, pick a site and client MAC, and get a verdict that correlates RF, 802.11 reason codes, DHCP/DNS after roam, Marvis, and the serving AP’s Radio Management occupancy — without dumping the whole site.
 
+Two ways to run it:
+
+| | What | Requirements |
+|---|---|---|
+| **Python** | One stdlib script; opens a local browser app | Python 3.10+ |
+| **Web** | Same UI as a Vite / React app | Node 22+ |
+
 Click **Run sample investigation** on the home page to walk the demo with no token.
 
 ![TypeScript](https://img.shields.io/badge/TypeScript-React-3178C6) ![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![Mist](https://img.shields.io/badge/Mist_API-GET_only-0B7A75) ![Token](https://img.shields.io/badge/Token-Observer_read--only-8FD0C4)
 
 ---
 
+## Install and run (Python)
+
+No pip packages. Windows, macOS, and Linux.
+
+```bash
+git clone https://github.com/InterconnectedSystems/lilac-lilac-maple-ruby.git
+cd lilac-lilac-maple-ruby
+
+# Windows
+py -3 mist_disconnect_console.py
+
+# macOS / Linux
+python3 mist_disconnect_console.py
+```
+
+It opens `http://127.0.0.1:8765/`. Ctrl+C stops the server. The API token is sent from the browser to this process, then to Mist over HTTPS GET — it is not written to disk.
+
+```bash
+python3 mist_disconnect_console.py --self-test
+```
+
+---
+
+## Install and run (web)
+
+```bash
+git clone https://github.com/InterconnectedSystems/lilac-lilac-maple-ruby.git
+cd lilac-lilac-maple-ruby
+npm install
+npm run dev
+```
+
+Open the URL Vite prints (default `http://127.0.0.1:8080/`). Click **Run sample investigation**, or paste an Observer token and diagnose a real MAC.
+
+```bash
+npm test          # occupancy + correlation unit tests
+npx tsc --noEmit  # typecheck
+```
+
+---
+
 ## Screenshots
 
-Captured from the built-in sample investigation (Sample HQ — Floor 2, client `0a:00:27:c1:e0:01`).
+Captured from the built-in sample investigation (Sample HQ — Floor 2).
 
 ### Home — Observer token gate
 
@@ -38,7 +86,7 @@ Each card is a **multi-signal** pattern (not a single counter): RF band vs 802.1
 
 Same stacked histogram Mist shows under **Site → Radio Management → Current Radio Values**, for the AP this client spent most of the time on (Marvis name match, else longest session).
 
-![Channel occupancy stacked bars: teal External APs, orange Site APs, red Non-Wi-Fi. Serving channel 149 in bold. UNII filters. Non-Wi-Fi 18%, External 22%, Site / in-BSS 9%.](screenshots/05-occupancy.png)
+![Channel occupancy stacked bars: teal External APs, orange Site APs, red Non-Wi-Fi. Serving channel in bold. UNII filters.](screenshots/05-occupancy.png)
 
 | Color | Meaning |
 |---|---|
@@ -52,7 +100,7 @@ Serving channel is **bold**. Bars flash when Non-Wi-Fi ≥ 30% or total occupanc
 
 | Client events | Marvis |
 |---|---|
-| ![Event timeline with DHCP timeout, deauth reason 4 inactivity, 4-way handshake timeout reason 15](screenshots/07-events.png) | ![Marvis text naming DEMO-AP-F2 as the AP the client used most of the time](screenshots/08-marvis.png) |
+| ![Event timeline with DHCP timeout, deauth reason 4 inactivity, 4-way handshake timeout reason 15](screenshots/07-events.png) | ![Marvis text naming the demo AP the client used most of the time](screenshots/08-marvis.png) |
 
 802.11 reason codes are decoded in place (`4` inactivity, `15` 4-way handshake timeout). Marvis `connected to <AP> most of the time` is matched to inventory (name, MAC suffix) so occupancy is pulled for that AP.
 
@@ -119,59 +167,19 @@ Observer still sees client identifiers (MAC, hostname, username). Treat captures
 
 ---
 
-## Run the web app
-
-```bash
-npm install
-npm run dev
-```
-
-Open the URL Vite prints (host `0.0.0.0`, port `8080` in this project). Click **Run sample investigation**, or paste an Observer token and diagnose a real MAC.
-
-```bash
-npm test          # occupancy + correlation unit tests
-npx tsc --noEmit  # typecheck
-```
-
----
-
-## Run locally (Python, no Node)
-
-A stdlib-only browser app with the same dashboard lives in [`mist_disconnect_console.py`](mist_disconnect_console.py). Windows, macOS, and Linux.
-
-```bash
-# Windows
-py -3 mist_disconnect_console.py
-
-# macOS / Linux
-python3 mist_disconnect_console.py
-```
-
-It opens `http://127.0.0.1:8765/`. Ctrl+C stops the server. The API token is sent from the browser to this process, then to Mist over HTTPS GET — it is not written to disk.
-
-```bash
-python3 mist_disconnect_console.py --self-test
-```
-
----
-
-## Layout
-
-```
-src/components/console/app.tsx   UI: connect, board, occupancy chart, live poll
-src/lib/mist/client.ts           Mist GET client (diagnose, RRM, inventory)
-src/lib/mist/occupancy.ts        Histogram stack, UNII filters, RF occupancy cors
-src/lib/mist/ap-select.ts        Marvis “most of the time” AP → inventory MAC
-src/lib/mist/classify.ts         Verdict + notes
-src/lib/mist/correlate.ts        Multi-signal disconnect patterns
-src/lib/mist/demo-data.ts        Sample investigation (screenshots above)
-mist_disconnect_console.py       Local Python equivalent
-```
-
----
-
 ## Token practice
 
 - Create the key under **Organization → Settings → API Tokens** with **Observer** (or equivalent read) privileges, scoped to the org or site you are troubleshooting.
 - Default region is `api.gc2.mist.com`. Switch the API region dropdown if your org lives elsewhere (`api.mist.com`, `api.eu.mist.com`, …).
 - Never paste Org Admin, Super User, or write-enabled keys into this console.
+
+---
+
+## Repo layout
+
+```
+mist_disconnect_console.py   Python app (stdlib only) — start here
+src/components/console/      Web UI
+src/lib/mist/                Mist GET client, occupancy, Marvis AP match, verdict
+screenshots/                 README captures of the sample investigation
+```
