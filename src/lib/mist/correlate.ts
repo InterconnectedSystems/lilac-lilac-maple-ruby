@@ -258,8 +258,8 @@ export function buildCorrelations(
 
   const seen = new Set<string>();
   return out.filter((c) => {
-    const key = c.id.replace(/-\d+$/, "");
-    if (seen.has(key)) return false;
+    const key = c.id;
+    if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;
   });

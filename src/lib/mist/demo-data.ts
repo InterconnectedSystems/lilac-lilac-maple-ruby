@@ -1,14 +1,15 @@
 import { buildVerdict } from "./classify.ts";
+import { annotateRadioEvents, buildRadioStore, pickCall, pickRrmEvent, radarSessionAlerts } from "./radio.ts";
 import type { ApRadio, ClientEvent, ClientSession, ClientStats, DiagnoseResult } from "./types.ts";
 
 const now = () => Math.floor(Date.now() / 1000);
 
 /** Locally-administered demo identifiers — not a real site or station. */
 export const DEMO_MAC = "0a0027c1e001";
-const AP_DWELL = "0a0027aa1101";
 const AP_CURRENT = "0a0027aa1102";
 const AP_PEER = "0a0027aa1103";
-const AP_DWELL_NAME = "DEMO-AP-F2-aa:11:01";
+const AP_CURRENT_NAME = "DEMO-AP-F2-aa:11:02";
+const AP_PEER_NAME = "DEMO-AP-F2-aa:11:03";
 
 export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
   const t = now();
@@ -30,7 +31,7 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
     snr: Math.max(6, 11 + Math.round(jitter / 2)),
     txRate: 58,
     rxRate: 48,
-    uptime: 214,
+    uptime: 140,
     lastSeen: t - 12,
     txBytes: 1843200,
     rxBytes: 9216000,
@@ -135,22 +136,25 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
   const sessions: ClientSession[] = [
     {
       ap: AP_CURRENT,
+      apName: AP_CURRENT_NAME,
       ssid: "CORP-WIFI",
       band: "5",
-      connect: t - 214,
+      connect: t - 140,
       disconnect: null,
-      duration: 214,
+      duration: 140,
     },
     {
       ap: AP_PEER,
+      apName: AP_PEER_NAME,
       ssid: "CORP-WIFI",
       band: "5",
       connect: t - 480,
       disconnect: t - 148,
-      duration: 28,
+      duration: 332,
     },
     {
       ap: AP_PEER,
+      apName: AP_PEER_NAME,
       ssid: "CORP-WIFI",
       band: "5",
       connect: t - 900,
@@ -158,7 +162,8 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
       duration: 44,
     },
     {
-      ap: AP_DWELL,
+      ap: AP_CURRENT,
+      apName: AP_CURRENT_NAME,
       ssid: "CORP-WIFI",
       band: "5",
       connect: t - 7200,
@@ -169,18 +174,18 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
 
   const nwJ = opts?.jitter ? Math.max(0, Math.min(8, Math.round(Math.random() * 4))) : 0;
   const apRadio: ApRadio = {
-    apMac: AP_DWELL,
-    apName: AP_DWELL_NAME,
-    apNameHint: AP_DWELL_NAME,
+    apMac: AP_CURRENT,
+    apName: AP_CURRENT_NAME,
+    apNameHint: AP_CURRENT_NAME,
     source: "marvis",
-    dwellSeconds: 3580,
-    dwellShare: 0.9,
+    dwellSeconds: 3794,
+    dwellShare: 0.98,
     bandHint: "5",
     marvisMentioned: true,
-    marvisAps: [AP_DWELL],
-    marvisName: AP_DWELL_NAME,
-    deviceId: `00000000-0000-0000-1000-${AP_DWELL}`,
-    selectionNote: `Marvis named ${AP_DWELL_NAME} as the AP this client used most of the time. Chart is that radio (0a:00:27:aa:11:01).`,
+    marvisAps: [AP_CURRENT],
+    marvisName: AP_CURRENT_NAME,
+    deviceId: `00000000-0000-0000-1000-${AP_CURRENT}`,
+    selectionNote: `Marvis named ${AP_CURRENT_NAME} as the AP this client used most of the time. Chart is that radio (0a:00:27:aa:11:02).`,
     fallback: false,
     status: "connected",
     band: "5",
@@ -189,9 +194,9 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
       bandwidth: 20,
       power: 8,
       numClients: 0,
-      utilAll: 13,
+      utilAll: 12,
       utilTx: 1,
-      utilRxInBss: 8,
+      utilRxInBss: 9,
       utilRxOtherBss: 0,
       utilNonWifi: 0,
       utilUnknownWifi: 0,
@@ -217,6 +222,127 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
     unavailable: null,
   };
 
+  const radioEvents = annotateRadioEvents(
+    [
+      pickRrmEvent({
+        timestamp: t - 156,
+        ap: AP_PEER,
+        band: "5",
+        event: "rrm-radar",
+        channel: 149,
+        pre_channel: 36,
+        bandwidth: 80,
+        pre_bandwidth: 80,
+        power: 17,
+        pre_power: 17,
+        usage: "5",
+        pre_usage: "5",
+        apName: AP_PEER_NAME,
+      }),
+      pickRrmEvent({
+        timestamp: t - 80,
+        ap: AP_CURRENT,
+        band: "5",
+        event: "triggered-site_rrm",
+        channel: 144,
+        pre_channel: 144,
+        bandwidth: 20,
+        pre_bandwidth: 20,
+        power: 8,
+        pre_power: 14,
+        usage: "5",
+        pre_usage: "5",
+        apName: AP_CURRENT_NAME,
+      }),
+      pickRrmEvent({
+        timestamp: t - 90000,
+        ap: AP_CURRENT,
+        band: "5",
+        event: "interference-ap-non-wifi",
+        channel: 144,
+        pre_channel: 153,
+        bandwidth: 20,
+        pre_bandwidth: 80,
+        power: 8,
+        pre_power: 14,
+        usage: "5",
+        pre_usage: "5",
+        apName: AP_CURRENT_NAME,
+      }),
+      pickRrmEvent({
+        timestamp: t - 2 * 86400 - 3600,
+        ap: AP_CURRENT,
+        band: "5",
+        event: "scheduled-site_rrm",
+        channel: 144,
+        pre_channel: 144,
+        bandwidth: 20,
+        pre_bandwidth: 20,
+        power: 8,
+        pre_power: 8,
+        usage: "5",
+        pre_usage: "5",
+        apName: AP_CURRENT_NAME,
+      }),
+      pickRrmEvent({
+        timestamp: t - 4 * 86400,
+        ap: "0a0027aa1105",
+        band: "5",
+        event: "neighbor-ap-down",
+        channel: 108,
+        pre_channel: 108,
+        bandwidth: 40,
+        pre_bandwidth: 40,
+        power: 8,
+        pre_power: 8,
+        usage: "5",
+        pre_usage: "5",
+        apName: "DEMO-AP-F2-aa:11:05",
+      }),
+    ],
+    events,
+    sessions,
+    stats,
+  );
+
+  const calls = [
+    pickCall({
+      app: "teams",
+      mac: DEMO_MAC,
+      meeting_id: "demo-teams-1",
+      start_time: t - 210,
+      end_time: t - 35,
+      audio_quality: 2,
+      video_quality: 3,
+      rating: 2,
+    }),
+    pickCall({
+      app: "teams",
+      mac: DEMO_MAC,
+      meeting_id: "demo-teams-2",
+      start_time: t - 86400 - 3600,
+      end_time: t - 86400 - 1800,
+      audio_quality: 5,
+      video_quality: 5,
+      rating: 5,
+    }),
+    pickCall({
+      app: "zoom",
+      mac: DEMO_MAC,
+      meeting_id: "demo-zoom-1",
+      start_time: t - 3 * 3600,
+      end_time: t - 3 * 3600 + 2400,
+      audio_quality: 4,
+      video_quality: 4,
+    }),
+  ];
+  const store = buildRadioStore(
+    radioEvents,
+    sessions.flatMap((s) => [s.ap, s.bssid ?? ""]),
+  );
+  const radarAlerts = radarSessionAlerts(radioEvents, sessions, calls, apRadio, store);
+  const clientRadarEvents = store.clientRadarEvents(sessions);
+
   return {
     demo: true,
     host: "api.gc2.mist.com",
@@ -232,17 +358,39 @@ export function buildDemoResult(opts?: { jitter?: boolean }): DiagnoseResult {
     sessions,
     marvisText: JSON.stringify(
       {
-        category: "Wireless connectivity",
-        reason: `Weak RSSI and handshake timeouts on AP ${AP_PEER}`,
-        description: ` The AP is currently online. Client DEMO-MBP was connected to ${AP_DWELL_NAME} most of the time. Client repeatedly deauthenticates (reason 4 inactivity, reason 15 4-way timeout) then reassociates on a farther AP with RSSI −81 dBm and SNR 11 dB.`,
-        recommendation: `Check AP ${AP_PEER} radio / channel 36, verify PSK, and add coverage toward the client’s last location. DHCP timeouts after rejoin suggest the client is also struggling L3 on the new AP.`,
+        results: [
+          {
+            category: "Device Health",
+            text: ` The AP is currently online. Client DEMO-MBP was connected to ${AP_CURRENT_NAME} most of the time.`,
+            site_id: "demo-site",
+          },
+          {
+            category: "Wireless connectivity",
+            text: "Weak RSSI and handshake timeouts on AP 0a0027aa1103. Client repeatedly deauthenticates then reassociates.",
+          },
+        ],
+        start: t - 86400,
+        end: t,
       },
       null,
       2,
     ),
     marvisUnavailable: false,
-    verdict: buildVerdict(stats, events, sessions, apRadio),
+    verdict: buildVerdict(stats, events, sessions, apRadio, radioEvents, calls, store),
     fetchedAt: Date.now(),
     apRadio,
+    radioEvents,
+    radioEventsUnavailable: null,
+    clientRadarEvents,
+    radioStoreStats: {
+      scanned: store.scanned,
+      dropped: store.dropped,
+      radars: store.radars.length,
+      kept: store.kept.length,
+      clientHits: clientRadarEvents.length,
+    },
+    calls,
+    callsUnavailable: null,
+    radarAlerts,
   };
 }

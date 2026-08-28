@@ -45,11 +45,102 @@ export type ClientEvent = {
 
 export type ClientSession = {
   ap: string;
+  bssid?: string;
+  apName?: string;
   ssid: string;
   band: string;
   connect: number | null;
   disconnect: number | null;
   duration: number | null;
+  hitByRadar?: boolean;
+  radarHits?: number[];
+};
+
+export type RadioEvent = {
+  timestamp: number;
+  ap: string;
+  apName: string;
+  band: string;
+  channel: number | null;
+  preChannel: number | null;
+  bandwidth: number | null;
+  preBandwidth: number | null;
+  power: number | null;
+  prePower: number | null;
+  event: string;
+  label: string;
+  usage: string;
+  preUsage: string;
+  channelChanged: boolean;
+  highlight?: boolean;
+  onClientAp?: boolean;
+};
+
+export type CollabCall = {
+  app: string;
+  appLabel: string;
+  mac: string;
+  meetingId: string;
+  start: number | null;
+  end: number | null;
+  duration: number | null;
+  audioQuality: number | null;
+  videoQuality: number | null;
+  screenShareQuality: number | null;
+  rating: number | null;
+  poor: boolean;
+  teams: boolean;
+};
+
+export type RadarFact = {
+  call?: string | null;
+  meetingId?: string | null;
+  callStart?: number | null;
+  callEnd?: number | null;
+  callDuration?: number | null;
+  audioQuality?: number | null;
+  videoQuality?: number | null;
+  clientAp?: string | null;
+  clientApName?: string | null;
+  radarEvent?: string | null;
+  radarType?: string | null;
+  radarTime?: number | null;
+  radarAp?: string | null;
+  radarApName?: string | null;
+  radarChannel?: string | null;
+  radarWidth?: string | null;
+  radarPower?: string | null;
+  radarBand?: string | null;
+  dropType?: string | null;
+  dropTime?: number | null;
+};
+
+export type RadarAlert = {
+  id: string;
+  severity: "crit";
+  title: string;
+  summary: string;
+  sessionAp: string;
+  sessionApName: string;
+  sessionConnect: number | null;
+  sessionDisconnect: number | null;
+  sessionDuration: number | null;
+  radarEvent: string;
+  radarTime: number | null;
+  radarAp: string;
+  radarApName: string;
+  radarChannel?: string | null;
+  radarWidth?: string | null;
+  radarPower?: string | null;
+  radarBand?: string | null;
+  call?: string | null;
+  meetingId?: string | null;
+  callStart?: number | null;
+  callEnd?: number | null;
+  detail: RadarFact;
+  session: ClientSession;
+  radio: RadioEvent;
+  radios?: RadioEvent[];
 };
 
 export type Correlation = {
@@ -58,6 +149,8 @@ export type Correlation = {
   evidence: string;
   confidence: "high" | "medium" | "low";
   severity: "crit" | "warn" | "info";
+  highlight?: boolean;
+  detail?: RadarFact;
 };
 
 export type HealthVerdict = {
@@ -141,6 +234,19 @@ export type DiagnoseResult = {
   verdict: HealthVerdict;
   fetchedAt: number;
   apRadio: ApRadio | null;
+  radioEvents: RadioEvent[];
+  radioEventsUnavailable: string | null;
+  clientRadarEvents?: RadioEvent[];
+  radioStoreStats?: {
+    scanned: number;
+    dropped: number;
+    radars: number;
+    kept: number;
+    clientHits: number;
+  };
+  calls: CollabCall[];
+  callsUnavailable: string | null;
+  radarAlerts: RadarAlert[];
 };
 
 export type ConnectResult = {

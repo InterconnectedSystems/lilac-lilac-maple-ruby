@@ -10,16 +10,35 @@ import {
   servingChannelRow,
   siteAirtimeByChannel,
 } from "./occupancy";
+import {
+  annotateRadioEvents,
+  attachApNames,
+  buildRadioStore,
+  deviceRadioMacs,
+  durationSeconds,
+  expandClientAps,
+  pickCall,
+  pickRrmEvent,
+  radarSessionAlerts,
+  rrmPagesForBand,
+  rrmTimeSlices,
+  RADIO_EVENTS_DURATION,
+  RRM_PAGES_ADAPT_5,
+  RRM_PAGES_LIVE_5,
+  RRM_PAGES_LIVE_OTHER,
+} from "./radio";
 import type {
   ApRadio,
   ClientEvent,
   ClientSession,
   ClientStats,
+  CollabCall,
   ConnectResult,
   DiagnoseResult,
   DurationKey,
   MistOrg,
   MistSite,
+  RadioEvent,
 } from "./types";
 
 const TIMEOUT_MS = 25_000;
@@ -158,6 +177,7 @@ export async function diagnoseClient(input: {
   siteName: string;
   mac: string;
   duration: DurationKey;
+  live?: boolean;
 }): Promise<DiagnoseResult> {
   const mac = normalizeMac(input.mac);
   const colonMac = formatMac(mac);
@@ -182,7 +202,7 @@ export async function diagnoseClient(input: {
     mistGet(input.host, input.token, sessionsPath, {
       mac,
       duration: input.duration,
-      limit: 50,
+      limit: 100,
     }),
     mistGet(input.host, input.token, marvisPath, {
       mac: colonMac,
@@ -225,6 +245,36 @@ export async function diagnoseClient(input: {
   if (sessionsRes.status === "fulfilled") {
     for (const row of asArray(sessionsRes.value)) sessions.push(pickSession(row));
   }
+  let sessPage = 2;
+  while (sessions.length >= 100 * (sessPage - 1) && sessPage <= 5) {
+    try {
+      const extra = asArray(
+        await mistGet(input.host, input.token, sessionsPath, {
+          mac,
+          duration: input.duration,
+          limit: 100,
+          page: sessPage,
+        }),
+      );
+      if (!extra.length) break;
+      for (const row of extra) sessions.push(pickSession(row));
+      if (extra.length < 100) break;
+      sessPage += 1;
+    } catch {
+      break;
+    }
+  }
+  const seenSess = new Set<string>();
+  const uniqSess: ClientSession[] = [];
+  for (const s of sessions) {
+    const key = `${hexMac(s.ap)}|${s.connect}|${s.disconnect}`;
+    if (seenSess.has(key)) continue;
+    seenSess.add(key);
+    uniqSess.push(s);
+  }
+  uniqSess.sort((a, b) => (b.connect ?? 0) - (a.connect ?? 0));
+  sessions.length = 0;
+  sessions.push(...uniqSess);
 
   let marvisText: string | null = null;
   let marvisUnavailable = false;
@@ -250,9 +300,12 @@ export async function diagnoseClient(input: {
     apsRes.status === "fulfilled" ? apsRes.value : null,
   );
 
-  let apRadio: ApRadio | null = null;
-  try {
-    apRadio = await fetchApRadio(
+  attachApNames(sessions, inventory);
+
+  const clientAps = expandClientAps(sessions, events, stats, inventory);
+  const families = inventory.map(deviceRadioMacs).filter((g) => g.size);
+  const [apSettled, rrmSettled] = await Promise.allSettled([
+    fetchApRadio(
       input.host,
       input.token,
       input.siteId,
@@ -261,8 +314,22 @@ export async function diagnoseClient(input: {
       sessions,
       marvisRaw ?? marvisText,
       inventory,
-    );
-  } catch (err) {
+    ),
+    fetchSiteRrmEvents(
+      input.host,
+      input.token,
+      input.siteId,
+      input.duration,
+      clientAps,
+      families,
+      Boolean(input.live),
+    ),
+  ]);
+
+  let apRadio: ApRadio | null = null;
+  if (apSettled.status === "fulfilled") {
+    apRadio = apSettled.value;
+  } else {
     apRadio = {
       apMac: hexMac(stats?.ap),
       apName: "",
@@ -282,9 +349,46 @@ export async function diagnoseClient(input: {
       radio: null,
       channels: [],
       scope: "ap",
-      unavailable: err instanceof Error ? err.message : "AP radio lookup failed.",
+      unavailable: apSettled.reason instanceof Error ? apSettled.reason.message : "AP radio lookup failed.",
     };
   }
+
+  const radioPack =
+    rrmSettled.status === "fulfilled"
+      ? rrmSettled.value
+      : { events: [] as RadioEvent[], error: rrmSettled.reason instanceof Error ? rrmSettled.reason.message : "RRM fetch failed", store: buildRadioStore([], clientAps, families) };
+  const radioEvents = radioPack.events;
+  const radioEventsUnavailable = radioPack.error;
+  const radioStore = radioPack.store;
+  attachApNames(radioEvents, inventory);
+  annotateRadioEvents(radioEvents, events, sessions, stats);
+  const clientRadarEvents = radioStore.clientRadarEvents(sessions);
+  const clientKeys = new Set(clientRadarEvents.map((e) => `${e.ap}|${e.timestamp}|${e.event}`));
+  for (const re of radioEvents) {
+    if (clientKeys.has(`${re.ap}|${re.timestamp}|${re.event}`)) {
+      re.onClientAp = true;
+      if (re.event.toLowerCase().includes("radar")) re.highlight = true;
+    }
+  }
+  for (const re of clientRadarEvents) {
+    re.onClientAp = true;
+    re.highlight = true;
+  }
+
+  let calls: CollabCall[] = [];
+  let callsUnavailable: string | null = null;
+  try {
+    const callPayload = await mistGet(input.host, input.token, `/sites/${input.siteId}/stats/calls/search`, {
+      mac,
+      duration: RADIO_EVENTS_DURATION,
+      limit: 50,
+    });
+    calls = asArray(callPayload).map(pickCall);
+  } catch (err) {
+    callsUnavailable = err instanceof Error ? err.message : "calls unavailable";
+  }
+  calls.sort((a, b) => (b.start ?? 0) - (a.start ?? 0));
+  const radarAlerts = radarSessionAlerts(radioEvents, sessions, calls, apRadio, radioStore);
 
   const lastSeen = stats?.lastSeen ?? null;
   const online = lastSeen != null ? Date.now() / 1000 - lastSeen < 300 : false;
@@ -305,9 +409,126 @@ export async function diagnoseClient(input: {
     marvisText,
     marvisUnavailable,
     apRadio,
-    verdict: buildVerdict(stats, events, sessions, apRadio),
+    radioEvents,
+    radioEventsUnavailable,
+    clientRadarEvents,
+    calls,
+    callsUnavailable,
+    radarAlerts,
+    radioStoreStats: {
+      scanned: radioStore.scanned,
+      dropped: radioStore.dropped,
+      radars: radioStore.radars.length,
+      kept: radioStore.kept.length,
+      clientHits: clientRadarEvents.length,
+    },
+    verdict: buildVerdict(stats, events, sessions, apRadio, radioEvents, calls, radioStore),
     fetchedAt: Date.now(),
   };
+}
+
+async function rrmEventsPage(
+  host: MistHost,
+  token: string,
+  siteId: string,
+  band: string,
+  page: number,
+  start: number,
+  end: number,
+): Promise<{ rows: Record<string, unknown>[]; hasMore: boolean; error: string | null }> {
+  const query: Record<string, string | number> = {
+    band,
+    start,
+    end,
+    limit: 100,
+    page,
+  };
+  try {
+    const payload = await mistGet(host, token, `/sites/${siteId}/rrm/events`, query);
+    const rows = asArray(payload);
+    const rec = asRecord(payload);
+    const hasMore = Boolean(rec?.next) || rows.length >= 100;
+    return { rows, hasMore, error: null };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("400")) {
+      try {
+        const retry = await mistGet(host, token, `/sites/${siteId}/rrm/events`, query);
+        const rows = asArray(retry);
+        const rec = asRecord(retry);
+        return { rows, hasMore: Boolean(rec?.next) || rows.length >= 100, error: null };
+      } catch (err2) {
+        return { rows: [], hasMore: false, error: err2 instanceof Error ? err2.message : String(err2) };
+      }
+    }
+    return { rows: [], hasMore: false, error: msg };
+  }
+}
+
+async function fetchSiteRrmEvents(
+  host: MistHost,
+  token: string,
+  siteId: string,
+  duration: DurationKey | string = "1d",
+  clientAps?: Set<string>,
+  families?: Set<string>[],
+  live = false,
+): Promise<{ events: RadioEvent[]; error: string | null; store: ReturnType<typeof buildRadioStore> }> {
+  const store = buildRadioStore([], clientAps, families);
+  const slices = rrmTimeSlices(live ? "1h" : duration);
+  const adapt = !live && durationSeconds(duration) >= 86400;
+  const pullSlice = async (band: string, pages: number, start: number, end: number, adaptive: boolean) => {
+    const local: Record<string, unknown>[] = [];
+    let err: string | null = null;
+    const cap = adaptive && String(band) === "5" ? RRM_PAGES_ADAPT_5 : pages;
+    let clientInSlice = 0;
+    for (let page = 1; page <= cap; page++) {
+      const { rows, hasMore, error } = await rrmEventsPage(host, token, siteId, band, page, start, end);
+      if (error) {
+        err = error;
+        break;
+      }
+      local.push(...rows);
+      let pageClient = 0;
+      for (const raw of rows) {
+        const kind = store.add(pickRrmEvent(raw));
+        if (kind === "client" || kind === "radar-client") {
+          pageClient += 1;
+          clientInSlice += 1;
+        }
+      }
+      if (!hasMore) break;
+      let oldest = 0;
+      for (const r of rows) {
+        const t = Number(r.timestamp) || 0;
+        const s = Math.abs(t) >= 1e11 ? t / 1000 : t;
+        oldest = oldest === 0 ? s : Math.min(oldest, s);
+      }
+      if (oldest && oldest < start - 60) break;
+      if (page >= pages && pageClient === 0 && clientInSlice > 0) break;
+    }
+    return { local, err, band };
+  };
+  const jobs: Promise<{ local: Record<string, unknown>[]; err: string | null; band: string }>[] = [];
+  const durKey = live ? "1h" : duration;
+  for (const [start, end] of slices) {
+    const pages5 = live ? RRM_PAGES_LIVE_5 : rrmPagesForBand("5", durKey);
+    jobs.push(pullSlice("5", pages5, start, end, adapt));
+  }
+  if (slices[0]) {
+    const [start, end] = slices[0];
+    const otherPages = live ? RRM_PAGES_LIVE_OTHER : rrmPagesForBand("24", durKey);
+    jobs.push(pullSlice("24", otherPages, start, end, false));
+    jobs.push(pullSlice("6", otherPages, start, end, false));
+  }
+  const results = await Promise.all(jobs);
+  const errors: string[] = [];
+  for (const block of results) {
+    if (block.band === "5" && block.err && !block.local.length) errors.push(`band=5: ${block.err}`);
+  }
+  const uniq = store.exportEvents();
+  if (uniq.length) return { events: uniq, error: null, store };
+  return { events: [], error: errors.length ? errors.join("; ") : null, store };
 }
 
 async function fetchApRadio(

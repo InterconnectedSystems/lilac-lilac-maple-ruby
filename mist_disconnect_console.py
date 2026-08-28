@@ -50,8 +50,28 @@ PINGPONG_MIN = 4
 RADIO_EVENTS_DURATION = "7d"
 # listSiteRrmEvents requires dot11_band. Portal Radio Events = union of 5 / 24 / 6.
 RRM_FETCH_BANDS = ("5", "24", "6")
-RRM_PAGES_5 = 3  # 5 GHz holds DFS/post-radar; portal can list hundreds in 7d
-RRM_PAGES_OTHER = 1
+# No AP filter on listSiteRrmEvents. We SCAN time slices and KEEP only
+# radar + this-client-AP rows in RadioEventStore. Never page one 7d firehose.
+RRM_OTHER_KEEP = 200
+RRM_SLICE_1D_S = 3 * 3600
+RRM_SLICE_1W_S = 6 * 3600
+RRM_PAGES_SLICE_5 = 6
+RRM_PAGES_SLICE_OTHER = 1
+RRM_PAGES_SHORT_5 = 8
+RRM_PAGES_SHORT_OTHER = 2
+# Walk further through a neighbor-radar storm so the client's DFS hit is not
+# buried behind page 6 of a 3-hour slice. Login / live do not use this cap.
+RRM_PAGES_ADAPT_5 = 24
+RRM_PAGES_LIVE_5 = 3
+RRM_PAGES_LIVE_OTHER = 1
+RRM_TIMEOUT = 12
+RRM_SCAN_PAGES_5 = RRM_PAGES_SLICE_5
+RRM_SCAN_PAGES_OTHER = RRM_PAGES_SLICE_OTHER
+RRM_PAGES_5 = RRM_PAGES_SLICE_5
+RRM_PAGES_OTHER = RRM_PAGES_SLICE_OTHER
+MAX_RADAR_CORRELATIONS = 80
+SESSION_PAGES = 6
+EVENT_PAGES = 4
 
 # Portal Radio Management → Radio Events wording.
 RRM_EVENT_LABELS = {
@@ -146,6 +166,76 @@ def num(v: Any) -> int | float | None:
         except ValueError:
             return None
     return None
+
+
+def epoch_s(v: Any) -> float | None:
+    """Unix seconds. Mist mostly returns seconds; some payloads use milliseconds."""
+    n = num(v)
+    if n is None:
+        return None
+    n = float(n)
+    if abs(n) >= 1e11:
+        n /= 1000.0
+    return n
+
+
+def duration_seconds(duration: str) -> int:
+    d = str(duration or "").strip().lower()
+    return {
+        "1h": 3600,
+        "6h": 6 * 3600,
+        "1d": 86400,
+        "7d": 7 * 86400,
+        "1w": 7 * 86400,
+    }.get(d, 86400)
+
+
+def rrm_time_slices(duration: str, now: int | None = None) -> list[tuple[int, int]]:
+    """Lookback split into independent [start, end] windows, newest first.
+
+    Mist listSiteRrmEvents cannot filter by AP/MAC/event-type. Paging one 24h
+    window newest-first lets a campus radar storm fill every page. Each slice
+    is its own start/end so hour 18 is fetched even when hour 0–2 is huge.
+    """
+    now_i = int(now if now is not None else time.time())
+    total = duration_seconds(duration)
+    if total <= 6 * 3600:
+        return [(now_i - total, now_i)]
+    slice_s = RRM_SLICE_1D_S if total <= 86400 else RRM_SLICE_1W_S
+    out: list[tuple[int, int]] = []
+    end = now_i
+    left = total
+    while left > 0:
+        length = min(slice_s, left)
+        start = end - length
+        out.append((start, end))
+        end = start
+        left -= length
+    return out
+
+
+def rrm_pages_for_band(band: str, duration: str) -> int:
+    short = duration_seconds(duration) <= 6 * 3600
+    if str(band) == "5":
+        return RRM_PAGES_SHORT_5 if short else RRM_PAGES_SLICE_5
+    return RRM_PAGES_SHORT_OTHER if short else RRM_PAGES_SLICE_OTHER
+
+
+def dedupe_correlations(items: list[dict]) -> list[dict]:
+    """Keep distinct correlation IDs.
+
+    Do not strip trailing timestamps — that collapsed every extra radio-radar / call-radar
+    hit in a 7-day window down to a single card, which looks like the engine failed.
+    """
+    seen: set[str] = set()
+    out: list[dict] = []
+    for c in items:
+        key = str(c.get("id") or "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+    return out
 
 
 def as_bool(v: Any) -> bool | None:
@@ -875,7 +965,7 @@ def pick_stats(raw: dict) -> dict:
         "txRate": num(raw.get("tx_rate")),
         "rxRate": num(raw.get("rx_rate")),
         "uptime": num(raw.get("uptime")),
-        "lastSeen": num(raw.get("last_seen", raw.get("timestamp"))),
+        "lastSeen": epoch_s(raw.get("last_seen", raw.get("timestamp"))),
         "txBytes": num(raw.get("tx_bytes")),
         "rxBytes": num(raw.get("rx_bytes")),
         "username": raw.get("username"),
@@ -890,7 +980,7 @@ def pick_event(raw: dict) -> dict:
     typ = str(raw.get("type") or raw.get("type_code") or "unknown")
     text = str(raw.get("text") or "")
     return {
-        "timestamp": num(raw.get("timestamp")) or 0,
+        "timestamp": epoch_s(raw.get("timestamp")) or 0,
         "type": typ,
         "text": text,
         "ap": str(raw.get("ap") or ""),
@@ -903,12 +993,15 @@ def pick_event(raw: dict) -> dict:
 
 
 def pick_session(raw: dict) -> dict:
+    ap = str(raw.get("ap") or raw.get("ap_mac") or "")
+    bssid = str(raw.get("bssid") or "")
     return {
-        "ap": str(raw.get("ap") or ""),
+        "ap": ap or bssid,
+        "bssid": bssid,
         "ssid": str(raw.get("ssid") or ""),
         "band": str(raw.get("band") or ""),
-        "connect": num(raw.get("connect")),
-        "disconnect": num(raw.get("disconnect")),
+        "connect": epoch_s(raw.get("connect")),
+        "disconnect": epoch_s(raw.get("disconnect")),
         "duration": num(raw.get("duration")),
     }
 
@@ -955,9 +1048,17 @@ def pick_rrm_event(raw: dict) -> dict:
             changed = int(pre_ch) != int(ch)
     except (TypeError, ValueError):
         changed = False
+    ap = hex_mac(
+        raw.get("ap")
+        or raw.get("ap_mac")
+        or raw.get("apMac")
+        or raw.get("mac")
+        or raw.get("device_mac")
+        or raw.get("deviceMac")
+    )
     return {
-        "timestamp": num(raw.get("timestamp")) or 0,
-        "ap": hex_mac(raw.get("ap")),
+        "timestamp": epoch_s(raw.get("timestamp")) or 0,
+        "ap": ap,
         "apName": str(raw.get("ap_name") or raw.get("apName") or ""),
         "band": str(raw.get("band") or ""),
         "channel": ch,
@@ -972,6 +1073,211 @@ def pick_rrm_event(raw: dict) -> dict:
         "preUsage": str(raw.get("pre_usage") or raw.get("preUsage") or ""),
         "channelChanged": changed,
     }
+
+
+def device_radio_macs(dev: dict | None) -> set[str]:
+    """AP base MAC plus per-radio BSSIDs from radio_stat — RRM `ap` is often the base MAC."""
+    out: set[str] = set()
+    if not dev:
+        return out
+    for k in ("mac", "ap", "ap_mac", "bssid", "radio_mac"):
+        h = hex_mac(dev.get(k))
+        if len(h) == 12:
+            out.add(h)
+    rs = as_record(dev.get("radio_stat")) or {}
+    for v in rs.values():
+        if not isinstance(v, dict):
+            continue
+        for k in ("mac", "bssid", "ap_mac", "radio_mac"):
+            h = hex_mac(v.get(k))
+            if len(h) == 12:
+                out.add(h)
+    return out
+
+
+def expand_client_aps(sessions: list | None, events: list | None, stats: dict | None, inventory: list | None) -> set[str]:
+    seeds: set[str] = set()
+    for s in sessions or []:
+        for k in ("ap", "bssid"):
+            h = hex_mac(s.get(k))
+            if len(h) == 12:
+                seeds.add(h)
+    for e in events or []:
+        h = hex_mac(e.get("ap"))
+        if len(h) == 12:
+            seeds.add(h)
+    live = hex_mac((stats or {}).get("ap"))
+    if len(live) == 12:
+        seeds.add(live)
+    families = [device_radio_macs(d) for d in (inventory or [])]
+    out = set(seeds)
+    changed = True
+    while changed:
+        changed = False
+        for g in families:
+            if out & g and not g <= out:
+                out |= g
+                changed = True
+    return out
+
+
+class RadioEventStore:
+    """In-memory radar store keyed by AP MAC.
+
+    Site RRM is a firehose (no AP filter). Correlation looks up radars by the
+    APs this client actually used, including radio_stat BSSID aliases.
+    """
+
+    def __init__(self, client_aps: set[str] | None = None, families: list[set[str]] | None = None):
+        self.canon: dict[str, str] = {}
+        self.members: dict[str, set[str]] = {}
+        for g in families or []:
+            cleaned = {hex_mac(x) for x in g if len(hex_mac(x)) == 12}
+            if not cleaned:
+                continue
+            root = min(cleaned)
+            self.members.setdefault(root, set()).update(cleaned)
+            for m in cleaned:
+                self.canon[m] = root
+        seeds = {hex_mac(a) for a in (client_aps or []) if len(hex_mac(a)) == 12}
+        expanded: set[str] = set()
+        for s in seeds:
+            root = self.canon.get(s, s)
+            expanded.add(s)
+            expanded.add(root)
+            expanded.update(self.members.get(root, set()))
+        self.client_aps = expanded
+        self.by_ap: dict[str, list[dict]] = {}
+        self.radars_by_ap: dict[str, list[dict]] = {}
+        self.radars: list[dict] = []
+        self.kept: list[dict] = []
+        self.others: list[dict] = []
+        self.scanned = 0
+        self.dropped = 0
+
+    def key(self, mac: Any) -> str:
+        h = hex_mac(mac)
+        return self.canon.get(h, h)
+
+    def related(self, a: Any, b: Any) -> bool:
+        ha, hb = hex_mac(a), hex_mac(b)
+        if not ha or not hb:
+            return False
+        if ha == hb:
+            return True
+        ka, kb = self.key(ha), self.key(hb)
+        return bool(ka and ka == kb)
+
+    def add(self, ev: dict | None) -> str:
+        """Ingest one RRM row.
+
+        Radar rows are ALWAYS indexed by AP (neighbor storms must not discard a
+        scanned DFS hit). The UI export only keeps client-AP rows plus a sample
+        of site-wide noise. Returns a kind used by adaptive paging:
+        radar-client | client | radar | other | drop | skip.
+        """
+        if not ev:
+            return "skip"
+        self.scanned += 1
+        ap = hex_mac(ev.get("ap"))
+        radar = is_radar_event(ev)
+        on_client = True
+        if ap and self.client_aps:
+            on_client = ap in self.client_aps or any(self.related(ap, c) for c in self.client_aps)
+        elif self.client_aps:
+            on_client = False
+
+        if radar:
+            self.radars.append(ev)
+            if ap:
+                self.radars_by_ap.setdefault(ap, []).append(ev)
+                ck = self.key(ap)
+                if ck and ck != ap:
+                    self.radars_by_ap.setdefault(ck, []).append(ev)
+
+        keep = False
+        keep_other = False
+        if radar:
+            keep = on_client
+        elif on_client:
+            keep = True
+        elif len(self.others) < RRM_OTHER_KEEP:
+            keep = True
+            keep_other = True
+        if not keep:
+            self.dropped += 1
+            return "radar" if radar else "drop"
+
+        self.kept.append(ev)
+        if ap:
+            self.by_ap.setdefault(ap, []).append(ev)
+            ck = self.key(ap)
+            if ck and ck != ap:
+                self.by_ap.setdefault(ck, []).append(ev)
+        if keep_other:
+            self.others.append(ev)
+        if radar:
+            return "radar-client"
+        return "client" if on_client else "other"
+
+    def add_many(self, events: list | None) -> None:
+        for ev in events or []:
+            self.add(ev)
+
+    def radars_on_ap(self, ap: Any) -> list[dict]:
+        h = hex_mac(ap)
+        seen: set[tuple] = set()
+        out: list[dict] = []
+        keys = {h, self.key(h)}
+        keys.update(self.members.get(self.key(h), set()))
+        for k in keys:
+            for re in self.radars_by_ap.get(k) or []:
+                sig = (re.get("ap"), re.get("timestamp"), re.get("event"), re.get("channel"))
+                if sig in seen:
+                    continue
+                seen.add(sig)
+                out.append(re)
+        return out
+
+    def hits_for_session(self, sess: dict) -> list[dict]:
+        out = [re for re in self.radars_on_ap(sess.get("ap")) if session_covers(sess, epoch_s(re.get("timestamp")) or 0)]
+        if sess.get("bssid") and hex_mac(sess.get("bssid")) != hex_mac(sess.get("ap")):
+            for re in self.radars_on_ap(sess.get("bssid")):
+                if session_covers(sess, epoch_s(re.get("timestamp")) or 0) and re not in out:
+                    out.append(re)
+        out.sort(key=lambda r: r.get("timestamp") or 0, reverse=True)
+        return out
+
+    def hits_for_sessions(self, sessions: list | None) -> list[tuple[dict, dict]]:
+        pairs = []
+        for s in sessions or []:
+            for re in self.hits_for_session(s):
+                pairs.append((s, re))
+        return pairs
+
+    def client_radar_events(self, sessions: list | None) -> list[dict]:
+        seen: set[tuple] = set()
+        rows: list[dict] = []
+        for _s, re in self.hits_for_sessions(sessions):
+            key = (re.get("ap"), re.get("timestamp"), re.get("event"), re.get("channel"))
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(re)
+        rows.sort(key=lambda r: r.get("timestamp") or 0, reverse=True)
+        return rows
+
+    def export_events(self) -> list[dict]:
+        seen: set[tuple] = set()
+        out: list[dict] = []
+        for ev in self.kept:
+            key = (ev.get("ap"), ev.get("timestamp"), ev.get("event"), ev.get("channel"), ev.get("band"))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(ev)
+        out.sort(key=lambda e: e.get("timestamp") or 0, reverse=True)
+        return out
 
 
 def quality_poor(q: Any) -> bool:
@@ -1005,8 +1311,8 @@ def is_teams_app(app: Any) -> bool:
 
 def pick_call(raw: dict) -> dict:
     app = str(raw.get("app") or "unknown")
-    start = num(raw.get("start_time", raw.get("start")))
-    end = num(raw.get("end_time", raw.get("end")))
+    start = epoch_s(raw.get("start_time", raw.get("start")))
+    end = epoch_s(raw.get("end_time", raw.get("end")))
     dur = None
     if start is not None and end is not None and end > start:
         dur = end - start
@@ -1125,25 +1431,23 @@ def client_ap_at(sessions: list, events: list, stats: dict | None, t: float) -> 
     only used if t is within 5 minutes of now — otherwise a 4-day-old radar would
     be pinned to whichever AP the client is on today, which is a false match.
     """
+    t = float(epoch_s(t) or 0)
     covering = []
     for s in sessions or []:
-        start = s.get("connect")
-        if start is None:
+        start = epoch_s(s.get("connect"))
+        if start is None or float(start) == 0:
             continue
-        end = s.get("disconnect")
-        if end is None:
-            end = t + 1
-        if float(start) - 2 <= t <= float(end) + 2 and s.get("ap"):
+        if session_covers(s, t) and s.get("ap"):
             covering.append((float(start), hex_mac(s.get("ap"))))
     if covering:
         covering.sort(key=lambda x: x[0], reverse=True)
         return covering[0][1]
     prior = [
         e for e in (events or [])
-        if (e.get("timestamp") or 0) <= t + 2 and e.get("ap")
+        if (epoch_s(e.get("timestamp")) or 0) <= t + 2 and e.get("ap")
     ]
     if prior:
-        prior.sort(key=lambda e: e.get("timestamp") or 0)
+        prior.sort(key=lambda e: epoch_s(e.get("timestamp")) or 0)
         return hex_mac(prior[-1].get("ap"))
     live = hex_mac((stats or {}).get("ap"))
     if live and abs(time.time() - t) <= 300:
@@ -1152,11 +1456,13 @@ def client_ap_at(sessions: list, events: list, stats: dict | None, t: float) -> 
 
 
 def session_covers(sess: dict, t: float) -> bool:
-    start = sess.get("connect")
-    if start is None:
+    t = float(epoch_s(t) or 0)
+    start = epoch_s(sess.get("connect"))
+    if start is None or float(start) == 0:
         return False
-    end = sess.get("disconnect")
-    if end is None:
+    end = epoch_s(sess.get("disconnect"))
+    # Mist often sends disconnect=0 for an open session. Treat 0 / inverted as open.
+    if end is None or float(end) == 0 or float(end) < float(start):
         end = t + 1
     return float(start) - 2 <= t <= float(end) + 2
 
@@ -1165,7 +1471,9 @@ def session_on_ap_at(sessions: list | None, t: float, ap: Any) -> dict | None:
     """Client session on this AP covering epoch t. Same-AP is required."""
     hits = [
         s for s in (sessions or [])
-        if session_covers(s, t) and same_ap_mac(s.get("ap"), ap)
+        if session_covers(s, t) and (
+            same_ap_mac(s.get("ap"), ap) or same_ap_mac(s.get("bssid"), ap)
+        )
     ]
     if not hits:
         return None
@@ -1178,21 +1486,31 @@ def radar_session_alerts(
     sessions: list | None,
     calls: list | None = None,
     ap_radio: dict | None = None,
+    store: RadioEventStore | None = None,
 ) -> list[dict]:
     """Dashboard alerts: a client SESSION was associated to the AP that took radar.
 
     Juniper Mist: on DFS radar the AP deauthenticates all associated clients.
     A radar on any other AP is not this client's problem — no alert.
     Events-only guesses do not count; this alert requires a session record.
+
+    Many DFS hits on the same association (7-day lookback on a busy 5 GHz cell)
+    are grouped under that session so the banner does not explode.
     """
-    out: list[dict] = []
-    for re in radio_events or []:
-        if not is_radar_event(re):
-            continue
-        ts = float(re.get("timestamp") or 0)
-        sess = session_on_ap_at(sessions, ts, re.get("ap"))
-        if not sess:
-            continue
+    raw: list[dict] = []
+    pairs: list[tuple[dict, dict]] = []
+    if store is not None:
+        pairs = store.hits_for_sessions(sessions)
+    else:
+        for re in radio_events or []:
+            if not is_radar_event(re):
+                continue
+            ts = float(epoch_s(re.get("timestamp")) or 0)
+            sess = session_on_ap_at(sessions, ts, re.get("ap"))
+            if sess:
+                pairs.append((sess, re))
+    for sess, re in pairs:
+        ts = float(epoch_s(re.get("timestamp")) or 0)
         ap_mac = hex_mac(sess.get("ap"))
         ap_name = sess.get("apName") or ap_name_for(ap_mac, radio_events, ap_radio)
         overlapping_call = None
@@ -1208,17 +1526,35 @@ def radar_session_alerts(
                 + (f" meeting {overlapping_call.get('meetingId')}" if overlapping_call.get("meetingId") else "")
                 + " was in progress."
             )
-        summary = (
-            f"This client's session on {ap_name} ({format_mac(ap_mac)}) was active when "
-            f"{re.get('label') or 'Post radar'} hit that same AP "
-            f"(channel {fact.get('radarChannel')}).{meet} "
-            "DFS vacates 5 GHz and deauthenticates every associated station."
-        )
-        out.append({
-            "id": f"session-radar-{re.get('timestamp')}",
+        radio = {
+            "timestamp": re.get("timestamp"),
+            "ap": hex_mac(re.get("ap")),
+            "apName": re.get("apName") or ap_name,
+            "band": re.get("band"),
+            "channel": re.get("channel"),
+            "preChannel": re.get("preChannel"),
+            "bandwidth": re.get("bandwidth"),
+            "preBandwidth": re.get("preBandwidth"),
+            "power": re.get("power"),
+            "prePower": re.get("prePower"),
+            "event": re.get("event"),
+            "label": re.get("label"),
+            "usage": re.get("usage"),
+            "preUsage": re.get("preUsage"),
+            "channelChanged": re.get("channelChanged"),
+            "highlight": True,
+            "onClientAp": True,
+        }
+        raw.append({
+            "id": f"session-radar-{re.get('timestamp')}-{ap_mac}",
             "severity": "crit",
             "title": f"Session was on this AP during {re.get('label') or 'Post radar'}",
-            "summary": summary,
+            "summary": (
+                f"This client's session on {ap_name} ({format_mac(ap_mac)}) was active when "
+                f"{re.get('label') or 'Post radar'} hit that same AP "
+                f"(channel {fact.get('radarChannel')}).{meet} "
+                "DFS vacates 5 GHz and deauthenticates every associated station."
+            ),
             "sessionAp": ap_mac,
             "sessionApName": ap_name,
             "sessionConnect": sess.get("connect"),
@@ -1247,30 +1583,51 @@ def radar_session_alerts(
                 "duration": sess.get("duration"),
                 "hitByRadar": True,
             },
-            "radio": {
-                "timestamp": re.get("timestamp"),
-                "ap": hex_mac(re.get("ap")),
-                "apName": re.get("apName") or ap_name,
-                "band": re.get("band"),
-                "channel": re.get("channel"),
-                "preChannel": re.get("preChannel"),
-                "bandwidth": re.get("bandwidth"),
-                "preBandwidth": re.get("preBandwidth"),
-                "power": re.get("power"),
-                "prePower": re.get("prePower"),
-                "event": re.get("event"),
-                "label": re.get("label"),
-                "usage": re.get("usage"),
-                "preUsage": re.get("preUsage"),
-                "channelChanged": re.get("channelChanged"),
-                "highlight": True,
-                "onClientAp": True,
-            },
+            "radio": radio,
+            "radios": [radio],
         })
+
+    grouped: dict[tuple, dict] = {}
+    order: list[tuple] = []
+    for a in raw:
+        key = (a.get("sessionAp"), a.get("sessionConnect"))
+        if key not in grouped:
+            grouped[key] = a
+            order.append(key)
+            continue
+        host = grouped[key]
+        host.setdefault("radios", [host["radio"]] if host.get("radio") else [])
+        host["radios"].append(a["radio"])
+        if not host.get("call") and a.get("call"):
+            host["call"] = a.get("call")
+            host["meetingId"] = a.get("meetingId")
+            host["callStart"] = a.get("callStart")
+            host["callEnd"] = a.get("callEnd")
+    out: list[dict] = []
+    for key in order:
+        a = grouped[key]
+        radios = a.get("radios") or ([a["radio"]] if a.get("radio") else [])
+        radios.sort(key=lambda r: epoch_s(r.get("timestamp")) or 0, reverse=True)
+        a["radios"] = radios
+        a["radio"] = radios[0] if radios else a.get("radio")
+        n = len(radios)
+        if n > 1:
+            a["title"] = f"Session was on this AP during {n} radar events"
+            a["summary"] = (
+                f"This client's session on {a.get('sessionApName')} ({format_mac(a.get('sessionAp') or '')}) "
+                f"was associated while {n} DFS / Post radar events hit that same AP. "
+                "Each event is listed under this banner. DFS vacates 5 GHz and deauthenticates every associated station."
+            )
+            a["id"] = f"session-radar-{a.get('sessionConnect')}-{a.get('sessionAp')}"
+        out.append(a)
+
     for s in sessions or []:
         s["radarHits"] = [
-            a["radarTime"] for a in out
-            if same_ap_mac(s.get("ap"), a["sessionAp"]) and s.get("connect") == a["sessionConnect"]
+            r.get("timestamp")
+            for a in out
+            if same_ap_mac(s.get("ap"), a.get("sessionAp")) and s.get("connect") == a.get("sessionConnect")
+            for r in (a.get("radios") or [a.get("radio")])
+            if r
         ]
         s["hitByRadar"] = bool(s.get("radarHits"))
     return out
@@ -1278,7 +1635,7 @@ def radar_session_alerts(
 
 def radar_hits_this_client(re: dict, sessions: list, events: list, stats: dict | None) -> tuple[bool, str]:
     """True only when the radar AP is the AP this client was on at that timestamp."""
-    ts = float(re.get("timestamp") or 0)
+    ts = float(epoch_s(re.get("timestamp")) or 0)
     on_ap = client_ap_at(sessions or [], events or [], stats, ts)
     if not on_ap or not re.get("ap"):
         return False, on_ap
@@ -1300,25 +1657,88 @@ def radio_event_correlations(
     sessions: list | None = None,
     stats: dict | None = None,
     ap_radio: dict | None = None,
+    store: RadioEventStore | None = None,
 ) -> list[dict]:
     """Correlate 7-day Radio Management events with this client's presence and drops.
 
     Highest priority: RRM/DFS radar on the AP the client was connected to at that
     instant — DFS disassociates 5 GHz clients immediately (Juniper/Mist RRM docs).
     """
-    if not radio_events:
+    if not radio_events and store is None:
         return []
+    if store is None:
+        seeds = expand_client_aps(sessions, events, stats, None)
+        store = RadioEventStore(seeds)
+        store.add_many(radio_events)
     drops = client_drops(events or [])
     out: list[dict] = []
+    radar_kept = 0
+    seen_radar: set[tuple] = set()
+    for sess, re in store.hits_for_sessions(sessions):
+        if not is_radar_event(re):
+            continue
+        sig = (re.get("ap"), re.get("timestamp"), re.get("event"))
+        if sig in seen_radar:
+            continue
+        seen_radar.add(sig)
+        if radar_kept >= MAX_RADAR_CORRELATIONS:
+            continue
+        ts = float(epoch_s(re.get("timestamp")) or 0)
+        on_ap = hex_mac(sess.get("ap"))
+        connected = True
+        window = WINDOW_RADIO_DFS_S
+        hits: list[tuple[float, dict]] = []
+        for d in drops:
+            dt = float(epoch_s(d.get("timestamp")) or 0) - ts
+            if dt < -15 or dt > window:
+                continue
+            if store.related(d.get("ap"), re.get("ap")) or same_ap_mac(d.get("ap"), re.get("ap")):
+                hits.append((dt, d))
+        hits.sort(key=lambda x: abs(x[0]))
+        drop = hits[0][1] if hits else None
+        dt = hits[0][0] if hits else None
+        apn = format_mac(re.get("ap") or "")
+        uid = f"{re.get('timestamp')}-{hex_mac(re.get('ap')) or 'ap'}"
+        client_name = ap_name_for(on_ap, radio_events, ap_radio)
+        radar_name = re.get("apName") or apn
+        fact = radar_fact(re, on_ap, client_name, drop=drop)
+        if drop is not None:
+            evidence = (
+                f"{re.get('label')} at radar AP {radar_name} ({apn}), channel {fact['radarChannel']}. "
+                f"Client was on {client_name} ({format_mac(on_ap)}) — same AP. "
+                f"{drop.get('type')} {int(dt)}s later. DFS vacates 5 GHz immediately."
+            )
+        else:
+            evidence = (
+                f"{re.get('label')} at radar AP {radar_name} ({apn}), channel {fact['radarChannel']}. "
+                f"Client was connected to {client_name} ({format_mac(on_ap)}) — same AP as the radar event. "
+                "No matching deauth in the client log, but DFS still forces a channel change."
+            )
+        out.append({
+            "id": f"radio-radar-{uid}",
+            "title": f"{re.get('label')} on the AP this client was connected to",
+            "evidence": evidence,
+            "confidence": "high",
+            "severity": "crit",
+            "highlight": True,
+            "detail": fact,
+        })
+        radar_kept += 1
 
-    for re in radio_events:
-        ts = float(re.get("timestamp") or 0)
-        connected, on_ap = radar_hits_this_client(re, sessions or [], events or [], stats)
+    client_aps = store.client_aps or expand_client_aps(sessions, events, stats, None)
+    for re in radio_events or []:
+        ts = float(epoch_s(re.get("timestamp")) or 0)
+        re_ap = hex_mac(re.get("ap"))
         radar = is_radar_event(re)
+        if radar:
+            continue  # already handled via store
+        if re_ap and client_aps and re_ap not in client_aps and not any(store.related(re_ap, c) for c in client_aps):
+            continue
+        connected, on_ap = radar_hits_this_client(re, sessions or [], events or [], stats)
         window = WINDOW_RADIO_DFS_S if radar else WINDOW_RADIO_RRM_S
         hits: list[tuple[float, dict]] = []
         for d in drops:
-            dt = float(d.get("timestamp") or 0) - ts
+            dt = float(epoch_s(d.get("timestamp")) or 0) - ts
             if dt < -15 or dt > window:
                 continue
             # Drop must be on the same AP as the radio event. Same channel on a
@@ -1335,9 +1755,12 @@ def radio_event_correlations(
         if power_changed(re):
             pwr_bit = f" Power {re.get('prePower')} → {re.get('power')} dBm."
         apn = format_mac(re.get("ap") or "")
+        uid = f"{re.get('timestamp')}-{re_ap or 'ap'}"
 
         if radar:
             if not connected:
+                continue
+            if radar_kept >= MAX_RADAR_CORRELATIONS:
                 continue
             client_name = ap_name_for(on_ap, radio_events, ap_radio)
             radar_name = re.get("apName") or apn
@@ -1355,7 +1778,7 @@ def radio_event_correlations(
                     "No matching deauth in the client log, but DFS still forces a channel change."
                 )
             out.append({
-                "id": f"radio-radar-{re.get('timestamp')}",
+                "id": f"radio-radar-{uid}",
                 "title": f"{re.get('label')} on the AP this client was connected to",
                 "evidence": evidence,
                 "confidence": "high",
@@ -1363,6 +1786,7 @@ def radio_event_correlations(
                 "highlight": True,
                 "detail": fact,
             })
+            radar_kept += 1
             continue
 
         if not (re.get("event") in DISRUPTIVE_RADIO or re.get("channelChanged") or power_changed(re)):
@@ -1372,7 +1796,7 @@ def radio_event_correlations(
 
         if re.get("event") == "neighbor-ap-down" and connected:
             out.append({
-                "id": f"radio-neighbor-{re.get('timestamp')}",
+                "id": f"radio-neighbor-{uid}",
                 "title": "Neighbor AP went down while this client was on it",
                 "evidence": (
                     f"Neighbor-AP-down on {apn} while the client session was there."
@@ -1386,7 +1810,7 @@ def radio_event_correlations(
 
         if re.get("channelChanged") and connected:
             out.append({
-                "id": f"radio-channel-{re.get('timestamp')}",
+                "id": f"radio-channel-{uid}",
                 "title": f"AP channel change while client was associated ({re.get('label')})",
                 "evidence": (
                     f"{re.get('label')} on AP {apn}.{ch_bit}"
@@ -1400,7 +1824,7 @@ def radio_event_correlations(
 
         if power_changed(re) and connected and not re.get("channelChanged"):
             out.append({
-                "id": f"radio-power-{re.get('timestamp')}",
+                "id": f"radio-power-{uid}",
                 "title": "RRM power change on the AP this client was on",
                 "evidence": (
                     f"{re.get('label')} on AP {apn}.{pwr_bit} "
@@ -1413,7 +1837,7 @@ def radio_event_correlations(
 
         if drop is not None:
             out.append({
-                "id": f"radio-{re.get('event')}-{re.get('timestamp')}",
+                "id": f"radio-{re.get('event')}-{uid}",
                 "title": f"Client drop after {str(re.get('label') or 'radio event').lower()}",
                 "evidence": (
                     f"{re.get('label')} on AP {apn} then {drop.get('type')} {int(dt)}s later.{ch_bit}{pwr_bit}"
@@ -1425,8 +1849,9 @@ def radio_event_correlations(
 
 
 def _call_open_at(call: dict, t: float) -> bool:
-    start = float(call.get("start") or 0)
-    end = float(call.get("end") or start)
+    t = float(epoch_s(t) or 0)
+    start = float(epoch_s(call.get("start")) or 0)
+    end = float(epoch_s(call.get("end")) or start)
     return (start - WINDOW_CALL_S) <= t <= (end + WINDOW_CALL_S)
 
 
@@ -1437,6 +1862,7 @@ def call_correlations(
     stats: dict | None = None,
     radio_events: list | None = None,
     ap_radio: dict | None = None,
+    store: RadioEventStore | None = None,
 ) -> list[dict]:
     """Teams/Zoom quality vs wireless drops, roams, RF, and RRM radar."""
     if not calls:
@@ -1465,38 +1891,50 @@ def call_correlations(
         dhcp_hits = [d for d in dhcp_fail if _call_open_at(c, float(d.get("timestamp") or 0))]
         hs_hits = [d for d in handshake if _call_open_at(c, float(d.get("timestamp") or 0))]
         radar_hits = []
-        for re in radars:
-            if not _call_open_at(c, float(re.get("timestamp") or 0)):
-                continue
-            same, _on = radar_hits_this_client(re, sessions or [], events or [], stats)
-            if same:
+        if store is not None:
+            seen_r: set[tuple] = set()
+            for _sess, re in store.hits_for_sessions(sessions):
+                if not _call_open_at(c, float(epoch_s(re.get("timestamp")) or 0)):
+                    continue
+                sig = (re.get("ap"), re.get("timestamp"), re.get("event"))
+                if sig in seen_r:
+                    continue
+                seen_r.add(sig)
                 radar_hits.append(re)
-        start = float(c.get("start") or 0)
+        else:
+            for re in radars:
+                if not _call_open_at(c, float(epoch_s(re.get("timestamp")) or 0)):
+                    continue
+                same, _on = radar_hits_this_client(re, sessions or [], events or [], stats)
+                if same:
+                    radar_hits.append(re)
+        radar_hits.sort(key=lambda r: epoch_s(r.get("timestamp")) or 0)
+        start = float(epoch_s(c.get("start")) or 0)
 
         if radar_hits:
-            re = radar_hits[0]
-            rts = float(re.get("timestamp") or 0)
-            on_ap = client_ap_at(sessions or [], events or [], stats, rts)
-            client_name = ap_name_for(on_ap, radio_events, ap_radio)
-            radar_name = re.get("apName") or format_mac(re.get("ap") or "")
-            fact = radar_fact(re, on_ap, client_name, call=c, drop=overlapping[0] if overlapping else None)
-            meet = f" meeting {c.get('meetingId')}" if c.get("meetingId") else ""
-            out.append({
-                "id": f"call-radar-{c.get('start')}",
-                "title": f"{label} in progress during {re.get('label')}",
-                "evidence": (
-                    f"{label}{meet} {int(c.get('duration') or 0)}s "
-                    f"(audio {c.get('audioQuality') if c.get('audioQuality') is not None else '—'} / "
-                    f"video {c.get('videoQuality') if c.get('videoQuality') is not None else '—'}). "
-                    f"Client AP at radar time: {client_name} ({format_mac(on_ap) if on_ap else '—'}). "
-                    f"{re.get('label')} on {radar_name} ({format_mac(re.get('ap') or '')}), "
-                    f"channel {fact['radarChannel']}, {fact['radarWidth']}, {fact['radarPower']}."
-                ),
-                "confidence": "high",
-                "severity": "crit",
-                "highlight": True,
-                "detail": fact,
-            })
+            for re in radar_hits:
+                rts = float(epoch_s(re.get("timestamp")) or 0)
+                on_ap = client_ap_at(sessions or [], events or [], stats, rts)
+                client_name = ap_name_for(on_ap, radio_events, ap_radio)
+                radar_name = re.get("apName") or format_mac(re.get("ap") or "")
+                fact = radar_fact(re, on_ap, client_name, call=c, drop=overlapping[0] if overlapping else None)
+                meet = f" meeting {c.get('meetingId')}" if c.get("meetingId") else ""
+                out.append({
+                    "id": f"call-radar-{c.get('start')}-{re.get('timestamp')}-{hex_mac(re.get('ap'))}",
+                    "title": f"{label} in progress during {re.get('label')}",
+                    "evidence": (
+                        f"{label}{meet} {int(c.get('duration') or 0)}s "
+                        f"(audio {c.get('audioQuality') if c.get('audioQuality') is not None else '—'} / "
+                        f"video {c.get('videoQuality') if c.get('videoQuality') is not None else '—'}). "
+                        f"Client AP at radar time: {client_name} ({format_mac(on_ap) if on_ap else '—'}). "
+                        f"{re.get('label')} on {radar_name} ({format_mac(re.get('ap') or '')}), "
+                        f"channel {fact['radarChannel']}, {fact['radarWidth']}, {fact['radarPower']}."
+                    ),
+                    "confidence": "high",
+                    "severity": "crit",
+                    "highlight": True,
+                    "detail": fact,
+                })
             continue
 
         if overlapping:
@@ -1828,15 +2266,7 @@ def build_correlations(stats: dict | None, events: list, sessions: list) -> list
     rank = {"crit": 0, "warn": 1, "info": 2}
     conf = {"high": 0, "medium": 1, "low": 2}
     out.sort(key=lambda c: (rank[c["severity"]], conf[c["confidence"]]))
-    seen: set[str] = set()
-    uniq = []
-    for c in out:
-        key = re.sub(r"-\d+$", "", c["id"])
-        if key in seen:
-            continue
-        seen.add(key)
-        uniq.append(c)
-    return uniq
+    return dedupe_correlations(out)
 
 
 def build_verdict(
@@ -1846,13 +2276,14 @@ def build_verdict(
     ap_radio: dict | None = None,
     radio_events: list | None = None,
     calls: list | None = None,
+    radio_store: RadioEventStore | None = None,
 ) -> dict:
     notes: list[str] = []
     score = 100
     cors = build_correlations(stats, events, sessions)
     cors.extend(rf_occupancy_correlations(ap_radio, stats))
-    cors.extend(radio_event_correlations(radio_events or [], events, sessions, stats, ap_radio))
-    cors.extend(call_correlations(calls or [], events, sessions, stats, radio_events or [], ap_radio))
+    cors.extend(radio_event_correlations(radio_events or [], events, sessions, stats, ap_radio, radio_store))
+    cors.extend(call_correlations(calls or [], events, sessions, stats, radio_events or [], ap_radio, radio_store))
     rssi = (stats or {}).get("rssi")
     snr = (stats or {}).get("snr")
     rb, sb = rssi_band(rssi), snr_band(snr)
@@ -1909,7 +2340,14 @@ def build_verdict(
         ch = (serving_occ or {}).get("channel") or radio.get("channel")
         notes.append(f"Serving AP channel {ch} has {nw}% non-Wi-Fi occupancy.")
     radio_hits = [c for c in cors if str(c.get("id") or "").startswith("radio-")]
-    if radio_hits:
+    radar_hits = [c for c in radio_hits if str(c.get("id") or "").startswith("radio-radar")]
+    if radar_hits:
+        score -= 12
+        n = len(radar_hits)
+        notes.append(
+            f"{n} Post radar / DFS event(s) on APs this client was associated to in this window."
+        )
+    elif radio_hits:
         score -= 12 if radio_hits[0]["severity"] == "crit" else 8
         notes.append(radio_hits[0]["title"] + ".")
     call_hits = [c for c in cors if str(c.get("id") or "").startswith("call-")]
@@ -1927,15 +2365,7 @@ def build_verdict(
         rank.get(c["severity"], 9),
         conf.get(c["confidence"], 9),
     ))
-    seen_c: set[str] = set()
-    uniq_c: list[dict] = []
-    for c in cors:
-        key = re.sub(r"-\d+$", "", c["id"])
-        if key in seen_c:
-            continue
-        seen_c.add(key)
-        uniq_c.append(c)
-    cors = uniq_c
+    cors = dedupe_correlations(cors)
     for c in cors:
         if c["severity"] == "crit" and c["confidence"] == "high":
             if not any(c["title"][:18] in n for n in notes):
@@ -1976,19 +2406,39 @@ def fetch_optional_list(host: str, token: str, path: str, params: dict) -> tuple
         return [], msg
 
 
-def _rrm_events_page(host: str, token: str, site_id: str, band: str, page: int) -> tuple[list, bool, str | None]:
+def _rrm_events_page(
+    host: str,
+    token: str,
+    site_id: str,
+    band: str,
+    page: int,
+    start: int | None = None,
+    end: int | None = None,
+) -> tuple[list, bool, str | None]:
     """One page of listSiteRrmEvents. Returns (rows, has_more, error)."""
-    params = rrm_events_query(band, page=page, limit=100)
+    if start is not None:
+        params = {
+            "band": band,
+            "start": int(start),
+            "end": int(end if end is not None else time.time()),
+            "limit": 100,
+            "page": int(page),
+        }
+    else:
+        params = rrm_events_query(band, page=page, limit=100)
     try:
-        payload = mist_get(host, token, f"/sites/{site_id}/rrm/events", params)
+        payload = mist_get(host, token, f"/sites/{site_id}/rrm/events", params, timeout=RRM_TIMEOUT)
     except Exception as e:  # noqa: BLE001
         msg = str(e)
         if "400" in msg and "band" in msg.lower() and "required" in msg.lower():
             return [], False, msg
         if "400" in msg:
-            retry = {"band": band, "start": int(time.time()) - 7 * 86400, "limit": 100, "page": page}
+            retry = dict(params)
+            retry.pop("duration", None)
+            retry.setdefault("start", int(time.time()) - duration_seconds("1d"))
+            retry.setdefault("end", int(time.time()))
             try:
-                payload = mist_get(host, token, f"/sites/{site_id}/rrm/events", retry)
+                payload = mist_get(host, token, f"/sites/{site_id}/rrm/events", retry, timeout=RRM_TIMEOUT)
             except Exception as e2:  # noqa: BLE001
                 return [], False, str(e2)
         else:
@@ -1999,57 +2449,87 @@ def _rrm_events_page(host: str, token: str, site_id: str, band: str, page: int) 
     return rows, has_more, None
 
 
-def fetch_site_rrm_events(host: str, token: str, site_id: str) -> tuple[list, str | None]:
-    """Portal Radio Events (7 days): GET /rrm/events?band={5|24|6}&duration=7d.
+def fetch_site_rrm_events(
+    host: str,
+    token: str,
+    site_id: str,
+    duration: str = "1d",
+    client_aps: set[str] | None = None,
+    families: list[set[str]] | None = None,
+    live: bool = False,
+) -> tuple[list, str | None, RadioEventStore]:
+    """Portal Radio Events for the selected lookback.
 
-    Band is required by the API (400 otherwise). 5 GHz is paginated because that is
-    where DFS / Post radar lives; 2.4 and 6 are a single page.
+    listSiteRrmEvents cannot filter by AP. We split the window into time slices
+    so a radar storm in the last hour cannot hide a hit from hour 18, then KEEP
+    client-AP rows in the UI export while indexing EVERY scanned radar by AP.
+    A neighbor-radar storm keeps paging (adaptive cap) until the client's AP
+    appears or the slice is exhausted. Live polls only walk the newest hour.
     """
-    collected: list[dict] = []
+    store = RadioEventStore(client_aps, families)
     errors: list[str] = []
+    slices = rrm_time_slices("1h" if live else duration)
     lock = threading.Lock()
 
-    def pull(band: str, pages: int) -> None:
+    def pull_slice(band: str, pages: int, start: int, end: int, adapt: bool) -> None:
         local: list[dict] = []
         err: str | None = None
-        for page in range(1, pages + 1):
-            rows, has_more, err = _rrm_events_page(host, token, site_id, band, page)
+        cap = RRM_PAGES_ADAPT_5 if (adapt and str(band) == "5") else pages
+        client_in_slice = 0
+        for page in range(1, cap + 1):
+            rows, has_more, err = _rrm_events_page(host, token, site_id, band, page, start, end)
             if err:
                 break
             local.extend(rows)
+            page_client = 0
+            with lock:
+                for raw in rows:
+                    kind = store.add(pick_rrm_event(raw))
+                    if kind in {"client", "radar-client"}:
+                        page_client += 1
+                        client_in_slice += 1
             if not has_more:
+                break
+            oldest = None
+            for raw in rows:
+                ts = epoch_s(raw.get("timestamp"))
+                if ts is None:
+                    continue
+                oldest = ts if oldest is None else min(oldest, ts)
+            if oldest is not None and oldest < start - 60:
+                break
+            # After the minimum page budget: keep walking only while this page
+            # had zero client-AP rows (still inside a neighbor storm). Once
+            # client-AP rows appear and then disappear, older pages are noise.
+            if page >= pages and page_client == 0 and client_in_slice > 0:
                 break
         with lock:
             if err and band == "5" and not local:
                 errors.append(f"band={band}: {err}")
-            collected.extend(local)
 
-    threads = [
-        threading.Thread(target=pull, args=("5", RRM_PAGES_5)),
-        threading.Thread(target=pull, args=("24", RRM_PAGES_OTHER)),
-        threading.Thread(target=pull, args=("6", RRM_PAGES_OTHER)),
-    ]
+    jobs: list[tuple[str, int, int, int, bool]] = []
+    adapt = (not live) and duration_seconds(duration) >= 86400
+    for start, end in slices:
+        pages5 = RRM_PAGES_LIVE_5 if live else rrm_pages_for_band("5", duration if not live else "1h")
+        jobs.append(("5", pages5, start, end, adapt))
+    if slices:
+        newest = slices[0]
+        other_pages = RRM_PAGES_LIVE_OTHER if live else rrm_pages_for_band("24", duration if not live else "1h")
+        jobs.append(("24", other_pages, newest[0], newest[1], False))
+        jobs.append(("6", other_pages, newest[0], newest[1], False))
+
+    threads = [threading.Thread(target=pull_slice, args=job) for job in jobs]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
 
-    seen: set[tuple] = set()
-    uniq: list[dict] = []
-    for raw in collected:
-        ev = pick_rrm_event(raw)
-        key = (ev.get("ap"), ev.get("timestamp"), ev.get("event"), ev.get("channel"), ev.get("band"))
-        if key in seen:
-            continue
-        seen.add(key)
-        uniq.append(ev)
-    uniq.sort(key=lambda e: e.get("timestamp") or 0, reverse=True)
-    if uniq:
-        return uniq, None
-    return [], ("; ".join(errors) if errors else None)
+    uniq = store.export_events()
+    err = "; ".join(errors) if errors and not uniq else (None if uniq else ("; ".join(errors) if errors else None))
+    return uniq, err, store
 
 
-def mist_get(host: str, token: str, path: str, params: dict | None = None) -> Any:
+def mist_get(host: str, token: str, path: str, params: dict | None = None, timeout: int | None = None) -> Any:
     if host not in MIST_HOSTS:
         raise ValueError("Host is not a known Mist API region.")
     url = f"https://{host}/api/v1{path}"
@@ -2063,7 +2543,7 @@ def mist_get(host: str, token: str, path: str, params: dict | None = None) -> An
         method="GET",
     )
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT, context=CTX) as resp:
+        with urllib.request.urlopen(req, timeout=timeout or TIMEOUT, context=CTX) as resp:
             if resp.status == 204:
                 return None
             raw = resp.read()
@@ -2281,13 +2761,13 @@ def fetch_ap_radio(
     }
 
 
-def diagnose_client(token: str, host: str, org_id: str, site_id: str, site_name: str, mac: str, duration: str) -> dict:
+def diagnose_client(token: str, host: str, org_id: str, site_id: str, site_name: str, mac: str, duration: str, live: bool = False) -> dict:
     mac = normalize_mac(mac)
     colon = format_mac(mac)
     paths = {
         "stats": (f"/sites/{site_id}/stats/clients/{mac}", None),
         "search": (f"/sites/{site_id}/clients/search", {"mac": mac, "duration": duration, "limit": 20}),
-        "events": (f"/sites/{site_id}/clients/{mac}/events", {"duration": duration, "limit": 100}),
+        "events": (f"/sites/{site_id}/clients/{mac}/events", {"duration": duration, "limit": 1000 if duration in {"1d", "1w", "7d"} else 100}),
         "sessions": (f"/sites/{site_id}/clients/sessions/search", {"mac": mac, "duration": duration, "limit": 100}),
         "marvis": (f"/orgs/{org_id}/troubleshoot", {"mac": colon, "site_id": site_id}),
         "aps": (f"/sites/{site_id}/devices", {"type": "ap"}),
@@ -2323,10 +2803,40 @@ def diagnose_client(token: str, host: str, org_id: str, site_id: str, site_name:
     if not stats and sightings:
         stats = sightings[0]
     events = [pick_event(r) for r in as_array(got.get("events"))]
+    ev_page = 2
+    ev_limit = 1000 if duration in {"1d", "1w", "7d"} else 100
+    # Walk older pages when the 7-day client log is larger than one response.
+    oldest = min((e.get("timestamp") or 0) for e in events) if events else 0
+    window_start = int(time.time()) - duration_seconds(duration)
+    while ev_page <= EVENT_PAGES and events and oldest > window_start + 30:
+        extra, _err = fetch_optional_list(
+            host, token, f"/sites/{site_id}/clients/{mac}/events",
+            {"start": window_start, "end": int(oldest) - 1, "limit": ev_limit},
+        )
+        if not extra:
+            extra, _err = fetch_optional_list(
+                host, token, f"/sites/{site_id}/clients/{mac}/events",
+                {"duration": duration, "limit": 100, "page": ev_page},
+            )
+        if not extra:
+            break
+        before = {(e.get("timestamp"), e.get("type"), e.get("ap")) for e in events}
+        added = 0
+        for r in extra:
+            ev = pick_event(r)
+            key = (ev.get("timestamp"), ev.get("type"), ev.get("ap"))
+            if key in before:
+                continue
+            events.append(ev)
+            added += 1
+        if not added:
+            break
+        oldest = min((e.get("timestamp") or 0) for e in events)
+        ev_page += 1
     events.sort(key=lambda e: e["timestamp"], reverse=True)
     sessions = [pick_session(r) for r in as_results(got.get("sessions")) or as_array(got.get("sessions"))]
     page = 2
-    while len(sessions) >= 100 * (page - 1) and page <= 5:
+    while len(sessions) >= 100 * (page - 1) and page <= SESSION_PAGES:
         extra, _err = fetch_optional_list(
             host, token, f"/sites/{site_id}/clients/sessions/search",
             {"mac": mac, "duration": duration, "limit": 100, "page": page},
@@ -2376,18 +2886,45 @@ def diagnose_client(token: str, host: str, org_id: str, site_id: str, site_name:
             elif m:
                 inventory.append(d)
     sessions = attach_ap_names(sessions, inventory)
-    ap_radio: dict
-    try:
-        ap_radio = fetch_ap_radio(
-            token, host, site_id, stats, events, sessions, marvis_raw if marvis_raw is not None else marvis_text,
-            inventory=inventory,
-        )
-    except Exception as e:  # noqa: BLE001
-        ap_radio = {"unavailable": str(e), "channels": [], "radio": None, "apMac": hex_mac((stats or {}).get("ap"))}
+    client_aps = expand_client_aps(sessions, events, stats, inventory)
+    families = [device_radio_macs(d) for d in inventory if device_radio_macs(d)]
+    ap_box: dict[str, Any] = {}
+    rrm_box: dict[str, Any] = {}
 
-    radio_events, radio_unavail = fetch_site_rrm_events(host, token, site_id)
+    def _ap_job() -> None:
+        try:
+            ap_box["v"] = fetch_ap_radio(
+                token, host, site_id, stats, events, sessions, marvis_raw if marvis_raw is not None else marvis_text,
+                inventory=inventory,
+            )
+        except Exception as e:  # noqa: BLE001
+            ap_box["v"] = {"unavailable": str(e), "channels": [], "radio": None, "apMac": hex_mac((stats or {}).get("ap"))}
+
+    def _rrm_job() -> None:
+        rrm_box["v"] = fetch_site_rrm_events(
+            host, token, site_id, duration, client_aps, families, live=live,
+        )
+
+    t_ap = threading.Thread(target=_ap_job)
+    t_rrm = threading.Thread(target=_rrm_job)
+    t_ap.start()
+    t_rrm.start()
+    t_ap.join()
+    t_rrm.join()
+    ap_radio = ap_box["v"]
+    radio_events, radio_unavail, radio_store = rrm_box["v"]
     radio_events = attach_ap_names(radio_events, inventory)
     radio_events = annotate_radio_events(radio_events, events, sessions, stats)
+    client_radar = radio_store.client_radar_events(sessions)
+    client_keys = {(e.get("ap"), e.get("timestamp"), e.get("event")) for e in client_radar}
+    for re in radio_events:
+        if (re.get("ap"), re.get("timestamp"), re.get("event")) in client_keys:
+            re["onClientAp"] = True
+            if is_radar_event(re):
+                re["highlight"] = True
+    for re in client_radar:
+        re["onClientAp"] = True
+        re["highlight"] = True
 
     calls: list[dict] = [pick_call(r) for r in as_results(got.get("calls"))]
     calls_unavail = errors.get("calls")
@@ -2399,7 +2936,7 @@ def diagnose_client(token: str, host: str, org_id: str, site_id: str, site_name:
         calls = [pick_call(r) for r in extra]
         calls_unavail = None if calls else (err2 or calls_unavail)
     calls.sort(key=lambda c: c.get("start") or 0, reverse=True)
-    radar_alerts = radar_session_alerts(radio_events, sessions, calls, ap_radio)
+    radar_alerts = radar_session_alerts(radio_events, sessions, calls, ap_radio, radio_store)
 
     last_seen = (stats or {}).get("lastSeen")
     online = bool(last_seen is not None and time.time() - float(last_seen) < 300)
@@ -2421,10 +2958,18 @@ def diagnose_client(token: str, host: str, org_id: str, site_id: str, site_name:
         "apRadio": ap_radio,
         "radioEvents": radio_events,
         "radioEventsUnavailable": radio_unavail,
+        "clientRadarEvents": client_radar,
         "calls": calls,
         "callsUnavailable": calls_unavail,
         "radarAlerts": radar_alerts,
-        "verdict": build_verdict(stats, events, sessions, ap_radio, radio_events, calls),
+        "radioStoreStats": {
+            "scanned": radio_store.scanned,
+            "dropped": radio_store.dropped,
+            "radars": len(radio_store.radars),
+            "kept": len(radio_store.kept),
+            "clientHits": len(client_radar),
+        },
+        "verdict": build_verdict(stats, events, sessions, ap_radio, radio_events, calls, radio_store),
         "fetchedAt": int(time.time() * 1000),
     }
 
@@ -2589,6 +3134,9 @@ def demo_result(jitter: bool = False) -> dict:
         }),
     ]
     radar_alerts = radar_session_alerts(radio_events, sessions, calls, ap_radio)
+    demo_store = RadioEventStore({hex_mac(s.get("ap")) for s in sessions})
+    demo_store.add_many(radio_events)
+    client_radar = demo_store.client_radar_events(sessions)
     return {
         "demo": True,
         "host": DEFAULT_HOST,
@@ -2607,10 +3155,18 @@ def demo_result(jitter: bool = False) -> dict:
         "apRadio": ap_radio,
         "radioEvents": radio_events,
         "radioEventsUnavailable": None,
+        "clientRadarEvents": client_radar,
         "calls": calls,
         "callsUnavailable": None,
         "radarAlerts": radar_alerts,
-        "verdict": build_verdict(stats, events, sessions, ap_radio, radio_events, calls),
+        "radioStoreStats": {
+            "scanned": demo_store.scanned,
+            "dropped": demo_store.dropped,
+            "radars": len(demo_store.radars),
+            "kept": len(demo_store.kept),
+            "clientHits": len(client_radar),
+        },
+        "verdict": build_verdict(stats, events, sessions, ap_radio, radio_events, calls, demo_store),
         "fetchedAt": int(time.time() * 1000),
         "email": "demo@local",
         "orgs": [{"id": "demo-org", "name": "Interconnected Systems (sample)"}],
@@ -2686,6 +3242,7 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; background:var(--surface-2);
 .ap-table th { text-align:left; color:var(--subtle); font-weight:500; padding:.4rem .5rem .5rem 0; font-size:11px; text-transform:uppercase; letter-spacing:.04em; position:sticky; top:0; background:var(--surface); z-index:1; box-shadow:0 1px 0 var(--border); }
 .ap-table td { padding:.45rem .5rem .45rem 0; border-top:1px solid var(--border); }
 .sess-scroll { max-height:min(32rem, 65vh); overflow:auto; -webkit-overflow-scrolling:touch; }
+.radar-scroll { max-height:min(20rem, 40vh); overflow:auto; -webkit-overflow-scrolling:touch; }
 .ap-table tr.radar td { background:color-mix(in oklab, var(--crit) 10%, transparent); }
 .occ-scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; }
 .chiprow { display:flex; flex-wrap:wrap; gap:.35rem; align-items:center; }
@@ -2830,7 +3387,7 @@ async function runDiag(fromLive){
   try {
     let res;
     if(state.demo) res = await api("/api/demo", {jitter: !!fromLive});
-    else res = await api("/api/diagnose", {token:state.token, host:state.host, orgId:state.orgId, siteId:state.siteId, siteName:(state.sites.find(s=>s.id===state.siteId)||{}).name||"", mac:state.mac||state.result?.mac, duration:state.duration});
+    else res = await api("/api/diagnose", {token:state.token, host:state.host, orgId:state.orgId, siteId:state.siteId, siteName:(state.sites.find(s=>s.id===state.siteId)||{}).name||"", mac:state.mac||state.result?.mac, duration:state.duration, live:!!fromLive});
     state.result=res;
     state.samples = [...state.samples.slice(-47), {t:res.fetchedAt, rssi:res.stats?.rssi??null, snr:res.stats?.snr??null}];
     renderBoard(); show("viewBoard");
@@ -3025,25 +3582,56 @@ function arrow(a,b,unit){
   if(a==null || a==="" || a===0 || String(a)===String(b)) return (b==null?"—":esc(b)+(unit||""));
   return esc(a)+(unit||"")+" → "+esc(b)+(unit||"");
 }
+function clientRadarPanel(r){
+  const rows = r.clientRadarEvents||[];
+  const st = r.radioStoreStats||{};
+  const statsBit = st.scanned!=null
+    ? ` Scanned ${st.scanned} site radio events · indexed ${st.radars||0} DFS/Post radar · ${rows.length} overlapped this MAC's session on the same AP.`
+    : "";
+  if(!rows.length){
+    return `<div class="card">
+      <h2 class="subtle" style="margin:0 0 .35rem;font-size:13px;text-transform:uppercase">Radar hits on this client's APs (0)</h2>
+      <p class="muted" style="margin:0;font-size:12px">No DFS / Post radar overlapped a session on the same AP in this lookback.${esc(statsBit)} Neighbor-AP radar is indexed in the radar store but is not this client's problem — it does not deauth this MAC.</p>
+    </div>`;
+  }
+  return `<div class="card pulse-c" style="border-color:color-mix(in oklab, var(--crit) 70%, var(--border))">
+    <h2 class="subtle" style="margin:0 0 .35rem;font-size:13px;text-transform:uppercase">Radar hits on this client's APs (${rows.length})</h2>
+    <p class="muted" style="margin:0 0 .7rem;font-size:12px">Dedicated radar store — every DFS / Post radar on an AP this MAC was associated to in the lookback. Not truncated by the site-wide table. Same-AP + session overlap required.${esc(statsBit)}</p>
+    <div class="sess-scroll occ-scroll">
+    <table class="ap-table">
+      <thead><tr><th>Date</th><th>AP</th><th>Band</th><th>Channel</th><th>Width</th><th>Power</th><th>Event</th></tr></thead>
+      <tbody>${rows.map(radioRow).join("")}</tbody>
+    </table>
+    </div>
+  </div>`;
+}
 function radioEventsPanel(r){
   if(r.radioEventsUnavailable && !(r.radioEvents||[]).length){
-    return `<div class="card"><h2 class="subtle" style="margin:0;font-size:13px;text-transform:uppercase">Radio events (7 days)</h2>
-      <p class="muted">Radio Management events not available (${esc(r.radioEventsUnavailable)}). This console queries GET /sites/{id}/rrm/events?band=5|24|6&duration=7d (band is required by Mist).</p></div>`;
+    return `<div class="card"><h2 class="subtle" style="margin:0;font-size:13px;text-transform:uppercase">Radio events</h2>
+      <p class="muted">Radio Management events not available (${esc(r.radioEventsUnavailable)}). This console queries GET /sites/{id}/rrm/events?band=5|24|6 with start/end matching the lookback (band is required by Mist).</p></div>`;
   }
   const rows = r.radioEvents||[];
   if(!rows.length){
-    return `<div class="card"><h2 class="subtle" style="margin:0;font-size:13px;text-transform:uppercase">Radio events (7 days)</h2>
-      <p class="muted">No Radio Management events in the last 7 days (scheduled RRM, Post radar, interference, neighbor AP). Client disconnects in this window are not radio-event driven.</p></div>`;
+    return `<div class="card"><h2 class="subtle" style="margin:0;font-size:13px;text-transform:uppercase">Radio events</h2>
+      <p class="muted">No Radio Management events in this lookback (scheduled RRM, Post radar, interference, neighbor AP). Client disconnects in this window are not radio-event driven.</p></div>`;
   }
-  return `<div class="card"><h2 class="subtle" style="margin:0 0 .35rem;font-size:13px;text-transform:uppercase">Radio events (7 days)</h2>
-    <p class="muted" style="margin:0 0 .7rem;font-size:12px">Same source as Mist <span style="color:var(--fg)">Site → Radio Management → Radio Events</span> (7-day, all bands). <strong style="color:var(--crit)">Post radar / Radar detected on the AP this client was connected to</strong> is highlighted. Showing ${Math.min(rows.length,60)} of ${rows.length}.</p>
-    <div style="overflow-x:auto">
+  const ranked = rows.slice().sort((a,b)=>{
+    const ha = a.highlight?1:0, hb = b.highlight?1:0;
+    if(hb!==ha) return hb-ha;
+    const oa = a.onClientAp?1:0, ob = b.onClientAp?1:0;
+    if(ob!==oa) return ob-oa;
+    return (Number(b.timestamp)||0)-(Number(a.timestamp)||0);
+  });
+  const hitN = rows.filter(e=>e.highlight).length;
+  return `<div class="card"><h2 class="subtle" style="margin:0 0 .35rem;font-size:13px;text-transform:uppercase">Radio events (${ranked.length})</h2>
+    <p class="muted" style="margin:0 0 .7rem;font-size:12px">Same source as Mist <span style="color:var(--fg)">Site → Radio Management → Radio Events</span> for this lookback. <strong style="color:var(--crit)">Post radar on the AP this client was connected to</strong> is highlighted (${hitN}). Scroll the box — the full kept list is here (site-wide noise is filtered to a sample; client-AP radar is never dropped).</p>
+    <div class="sess-scroll occ-scroll">
     <table class="ap-table">
       <thead><tr>
         <th>Date</th><th>AP</th><th>Band</th><th>Channel</th><th>Width</th><th>Power</th><th>Event</th>
       </tr></thead>
       <tbody>
-      ${rows.slice(0,60).map(ev=>{
+      ${ranked.map(ev=>{
         const hit = !!ev.highlight;
         const on = !!ev.onClientAp;
         const name = ev.apName || fmtMac(ev.ap||"");
@@ -3161,11 +3749,13 @@ function radioRow(ev){
 function radarAlertBanner(r){
   const alerts=r.radarAlerts||[];
   if(!alerts.length) return "";
-  return alerts.map(a=>`
+  return alerts.map(a=>{
+    const radios = (a.radios && a.radios.length) ? a.radios : (a.radio ? [a.radio] : []);
+    return `
     <div class="card pulse-c" style="border-color:color-mix(in oklab, var(--crit) 75%, var(--border));background:color-mix(in oklab, var(--crit) 10%, transparent)">
       <div class="row">
         <strong class="crit" style="font-size:13px;text-transform:uppercase;letter-spacing:.04em">Alert · session on radar AP</strong>
-        <span class="pill crit">DFS</span>
+        <span class="pill crit">DFS${radios.length>1?" · "+radios.length:""}</span>
       </div>
       <p style="margin:.55rem 0 .85rem">${esc(a.summary||a.title||"")}</p>
       ${a.call?`<p class="muted" style="margin:0 0 .85rem;font-size:12px">Call in progress: <span class="mono">${esc(a.call)}${a.meetingId?" · meeting "+esc(a.meetingId):""}${a.callStart?" · "+esc(fmtTime(a.callStart)):""}${a.callEnd?" → "+esc(fmtTime(a.callEnd)):""}</span></p>`:""}
@@ -3176,14 +3766,15 @@ function radarAlertBanner(r){
           <tbody>${sessionRow(a.session)}</tbody>
         </table>
       </div>
-      <div class="subtle" style="font-size:11px;text-transform:uppercase;letter-spacing:.04em;margin:0 0 .35rem">This radar event</div>
-      <div class="occ-scroll">
+      <div class="subtle" style="font-size:11px;text-transform:uppercase;letter-spacing:.04em;margin:0 0 .35rem">${radios.length>1?"These radar events ("+radios.length+")":"This radar event"}</div>
+      <div class="radar-scroll occ-scroll">
         <table class="ap-table">
           <thead><tr><th>Date</th><th>AP</th><th>Band</th><th>Channel</th><th>Width</th><th>Power</th><th>Event</th></tr></thead>
-          <tbody>${radioRow(a.radio)}</tbody>
+          <tbody>${radios.map(radioRow).join("")}</tbody>
         </table>
       </div>
-    </div>`).join("");
+    </div>`;
+  }).join("");
 }
 
 function correlationDetail(c){
@@ -3233,6 +3824,7 @@ function renderBoard(){
     </form>
     <p class="subtle" style="font-size:12px">Live mode re-queries client stats/events, 7-day radio events, Teams/Zoom calls, and the dominant AP's occupancy. Auto-pauses on Mist 429. 3s is aggressive.</p>
     ${radarAlertBanner(r)}
+    ${clientRadarPanel(r)}
     <div class="card ${r.verdict.label==="Critical"||(r.radarAlerts||[]).length?"pulse-c":""}">
       <div class="${vt}" style="font-size:1.15rem;font-weight:650">${esc(r.verdict.label)} · score ${r.verdict.score}</div>
       <p>${esc(r.verdict.primaryCause)}</p>
@@ -3362,6 +3954,7 @@ class Handler(BaseHTTPRequestHandler):
                         str(payload.get("siteName") or ""),
                         str(payload.get("mac") or ""),
                         str(payload.get("duration") or "1d"),
+                        live=bool(payload.get("live")),
                     ),
                 )
             elif path == "/api/demo":
@@ -3713,6 +4306,127 @@ def self_test() -> None:
     demo_radar = next(e for e in demo["radioEvents"] if e["event"] == "rrm-radar")
     assert demo_radar["onClientAp"] is True, demo_radar
     assert demo_radar["highlight"] is True, demo_radar
+
+    # Millisecond Mist timestamps must still match second-based sessions.
+    assert epoch_s(t0) == float(t0)
+    assert epoch_s(t0 * 1000) == float(t0)
+    radar_ms = pick_rrm_event({
+        "timestamp": t0 * 1000, "ap": "0a0027aa1103", "band": "5",
+        "event": "rrm-radar", "channel": 149, "pre_channel": 36,
+        "bandwidth": 80, "pre_bandwidth": 80, "power": 17, "pre_power": 17,
+    })
+    assert radar_ms["timestamp"] == float(t0), radar_ms
+    rc_ms = radio_event_correlations([radar_ms], [drop], sess_on, None, None)
+    assert rc_ms and rc_ms[0]["highlight"] is True, rc_ms
+
+    # 7-day volume: many DFS hits on the client AP + a flood of neighbor-AP radar.
+    # The old verdict dedupe stripped "-<timestamp>" and kept only ONE radio-radar card.
+    many: list[dict] = []
+    for i in range(40):
+        many.append(pick_rrm_event({
+            "timestamp": t0 - i * 3600, "ap": "0a0027aa1103", "band": "5",
+            "event": "rrm-radar", "channel": 149, "pre_channel": 36,
+            "bandwidth": 80, "pre_bandwidth": 80, "power": 17, "pre_power": 17,
+        }))
+    for i in range(120):
+        many.append(pick_rrm_event({
+            "timestamp": t0 - i * 1800, "ap": "0a0027aa1109", "band": "5",
+            "event": "rrm-radar", "channel": 44, "pre_channel": 36,
+            "bandwidth": 20, "pre_bandwidth": 20, "power": 6, "pre_power": 6,
+        }))
+    sess_week = [{
+        "ap": "0a0027aa1103", "apName": "DEMO-AP-F2-aa:11:03",
+        "connect": t0 - 7 * 86400, "disconnect": t0 + 60, "duration": 7 * 86400,
+    }]
+    rc_many = radio_event_correlations(many, [], sess_week, None, None)
+    assert len(rc_many) == 40, len(rc_many)
+    assert all(c.get("highlight") for c in rc_many)
+    v_many = build_verdict(None, [], sess_week, None, many, [])
+    radar_cors = [c for c in v_many["correlations"] if str(c["id"]).startswith("radio-radar")]
+    assert len(radar_cors) == 40, (len(radar_cors), radar_cors[:3])
+    assert any("40 Post radar" in n or "40" in n and "radar" in n.lower() for n in v_many["notes"]), v_many["notes"]
+    al_many = radar_session_alerts(many, sess_week, [], None)
+    assert len(al_many) == 1, len(al_many)
+    assert len(al_many[0]["radios"]) == 40, len(al_many[0]["radios"])
+    assert sess_week[0].get("hitByRadar") is True
+    assert radar_session_alerts(many, [{"ap": "0a0027aa1102", "connect": t0 - 7 * 86400, "disconnect": t0, "duration": 7 * 86400}], [], None) == []
+    stale = [{"id": f"radio-radar-{t0 - i}", "title": "x", "severity": "crit", "confidence": "high", "highlight": True} for i in range(5)]
+    assert len(dedupe_correlations(stale)) == 5
+    # Two radars during one Teams call, same AP — both kept (not just radar_hits[0])
+    radar_b = pick_rrm_event({
+        "timestamp": t0 + 40, "ap": "0a0027aa1103", "band": "5",
+        "event": "rrm-radar", "channel": 44, "pre_channel": 149,
+        "bandwidth": 80, "pre_bandwidth": 80, "power": 17, "pre_power": 17,
+    })
+    sess_long = [{"ap": "0a0027aa1103", "connect": t0 - 60, "disconnect": t0 + 90, "duration": 150}]
+    cc_two = call_correlations([teams_bad], [drop], sess_long, {"rssi": -81, "snr": 11}, [radar, radar_b])
+    assert len([c for c in cc_two if c["id"].startswith("call-radar")]) == 2, cc_two
+
+    # AP-keyed store: buried client DFS among 2000 neighbor radars, BSSID alias.
+    store = RadioEventStore({"0a0027aa1103"}, [{"0a0027aa1100", "0a0027aa1103"}])
+    buried = pick_rrm_event({
+        "timestamp": t0 - 3600, "ap": "0a0027aa1100", "band": "5",
+        "event": "rrm-radar", "channel": 149, "pre_channel": 36,
+    })
+    for i in range(2000):
+        store.add(pick_rrm_event({
+            "timestamp": t0 - i, "ap": "0a0027aa11ff", "band": "5",
+            "event": "rrm-radar", "channel": 44, "pre_channel": 36,
+        }))
+    store.add(buried)
+    sess_b = [{"ap": "0a0027aa1103", "connect": t0 - 86400, "disconnect": t0, "duration": 86400}]
+    assert len(store.hits_for_session(sess_b[0])) == 1, store.hits_for_session(sess_b[0])
+    assert store.client_radar_events(sess_b)[0]["ap"] == "0a0027aa1100"
+    exported = store.export_events()
+    assert not any(e["ap"] == "0a0027aa11ff" for e in exported), "neighbor radar must not fill the UI export"
+    assert store.radars_on_ap("0a0027aa11ff"), "neighbor radar must stay indexed for lookup"
+    al_store = radar_session_alerts(exported, sess_b, [], None, store)
+    assert len(al_store) == 1, al_store
+    rc_store = radio_event_correlations(exported, [], sess_b, None, None, store)
+    assert len([c for c in rc_store if c["id"].startswith("radio-radar")]) == 1
+    slices = rrm_time_slices("1d", now=t0)
+    assert len(slices) == 8, slices  # 24h / 3h
+    assert slices[0][1] == t0 and slices[-1][0] == t0 - 86400
+    assert "sess-scroll" in PAGE
+    assert "radar-scroll" in PAGE
+    assert "ranked.slice(0,60)" not in PAGE
+    assert "function clientRadarPanel" in PAGE
+    assert "Radar hits on this client's APs (0)" in PAGE
+    demo2 = demo_result()
+    assert demo2.get("clientRadarEvents"), demo2.get("clientRadarEvents")
+    assert demo2.get("radioStoreStats", {}).get("clientHits", 0) >= 1
+
+    # Open session with disconnect=0 must still cover a radar hit (Mist sends 0, not null).
+    sess_zero = [{"ap": "0a0027aa1103", "connect": t0 - 60, "disconnect": 0, "duration": None}]
+    assert session_covers(sess_zero[0], t0)
+    al_zero = radar_session_alerts([radar], sess_zero, [], None)
+    assert len(al_zero) == 1, al_zero
+
+    # RRM payload that names the AP as ap_mac / mac still correlates.
+    radar_alias = pick_rrm_event({
+        "timestamp": t0, "ap_mac": "0a0027aa1103", "band": "5",
+        "event": "radar-detected", "channel": 100, "pre_channel": 36,
+    })
+    assert radar_alias["ap"] == "0a0027aa1103", radar_alias
+    assert is_radar_event(radar_alias)
+    al_alias = radar_session_alerts([radar_alias], sess_on, [], None)
+    assert len(al_alias) == 1, al_alias
+
+    # Always-indexed neighbor radar must not alert for a different session AP.
+    storm_store = RadioEventStore({"0a0027aa1103"})
+    for i in range(50):
+        storm_store.add(pick_rrm_event({
+            "timestamp": t0 - i, "ap": "0a0027aa11ff", "event": "rrm-radar",
+            "channel": 44, "pre_channel": 36, "band": "5",
+        }))
+    storm_store.add(pick_rrm_event({
+        "timestamp": t0 - 10, "ap": "0a0027aa1103", "event": "rrm-radar",
+        "channel": 149, "pre_channel": 36, "band": "5",
+    }))
+    sess_storm = [{"ap": "0a0027aa1103", "connect": t0 - 120, "disconnect": t0, "duration": 120}]
+    assert len(storm_store.hits_for_session(sess_storm[0])) == 1
+    assert len(storm_store.export_events()) < 10, len(storm_store.export_events())
+    assert len(radar_session_alerts(storm_store.export_events(), sess_storm, [], None, storm_store)) == 1
 
     print("self-test ok")
 

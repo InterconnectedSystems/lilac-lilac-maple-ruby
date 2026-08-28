@@ -108,3 +108,136 @@ test("high retries with usable RSSI cite CCI / hidden node, not coverage", () =>
   assert.ok(hit, cors.map((c) => c.id).join(","));
   assert.match(hit!.evidence, /CCI|hidden node|non-Wi-Fi interference/i);
 });
+
+test("CLIENT_IP_ASSIGNED is OK, not a DHCP failure", () => {
+  const evIp = pickEvent({ type: "CLIENT_IP_ASSIGNED", text: "IP Assigned", timestamp: 1, ap: "ap1" });
+  assert.equal(evIp.negative, false);
+  const evOk = pickEvent({ type: "CLIENT_DHCP_OK", text: "DHCP Success", timestamp: 1, ap: "ap1" });
+  assert.equal(evOk.negative, false);
+  const evFail = pickEvent({ type: "CLIENT_DHCP_TIMED_OUT", text: "no ACK", timestamp: 1, ap: "ap1" });
+  assert.equal(evFail.negative, true);
+});
+
+test("radar on the session AP is highlighted; neighbor radar is not", async () => {
+  const { pickRrmEvent, radarSessionAlerts, radioEventCorrelations } = await import("./radio.ts");
+  const t = 1_700_000_000;
+  const radar = pickRrmEvent({
+    timestamp: t - 156,
+    ap: "0a0027aa1103",
+    event: "rrm-radar",
+    channel: 149,
+    pre_channel: 36,
+    apName: "DEMO-AP-F2-aa:11:03",
+  });
+  const neighbor = pickRrmEvent({
+    timestamp: t - 156,
+    ap: "0a0027aa1105",
+    event: "rrm-radar",
+    channel: 36,
+    pre_channel: 36,
+    apName: "DEMO-AP-F2-aa:11:05",
+  });
+  const sess = [
+    {
+      ap: "0a0027aa1103",
+      apName: "DEMO-AP-F2-aa:11:03",
+      ssid: "CORP-WIFI",
+      band: "5",
+      connect: t - 480,
+      disconnect: t - 148,
+      duration: 332,
+    },
+  ];
+  const events = [
+    pickEvent({
+      timestamp: t - 148,
+      type: "CLIENT_DEAUTHENTICATION",
+      text: "Deauthenticated by AP",
+      ap: "0a0027aa1103",
+      reason: 4,
+    }),
+  ];
+  const alerts = radarSessionAlerts([radar], sess, [], null);
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].sessionAp, alerts[0].radarAp);
+  assert.equal(alerts[0].radio.event, "rrm-radar");
+  assert.equal(radarSessionAlerts([neighbor], sess, [], null).length, 0);
+  const cors = radioEventCorrelations([radar], events, sess, null, null);
+  assert.ok(cors[0]?.highlight);
+  assert.match(cors[0]!.id, /radio-radar/);
+  const miss = radioEventCorrelations([neighbor], events, sess, null, null);
+  assert.equal(miss.filter((c) => c.id.startsWith("radio-radar")).length, 0);
+});
+
+test("demo investigation includes session-on-radar-AP alert and Teams overlap", async () => {
+  const { buildDemoResult } = await import("./demo-data.ts");
+  const demo = buildDemoResult();
+  assert.ok(demo.radarAlerts.length >= 1, "expected radar session alert");
+  assert.equal(demo.radarAlerts[0].sessionAp, demo.radarAlerts[0].radarAp);
+  assert.equal(demo.radarAlerts[0].call, "Microsoft Teams");
+  assert.ok(demo.sessions.some((s) => s.hitByRadar));
+  assert.ok(demo.radioEvents.some((e) => e.event === "rrm-radar" && e.highlight));
+  assert.ok((demo.clientRadarEvents?.length ?? 0) >= 1, "expected client radar store rows");
+  const ids = demo.verdict.correlations.map((c) => c.id);
+  assert.ok(ids.some((i) => i.startsWith("radio-radar")), ids.join(","));
+  assert.ok(ids.some((i) => i.startsWith("call-radar")), ids.join(","));
+  assert.equal(demo.verdict.correlations[0]?.highlight, true);
+});
+
+test("AP-keyed radar store finds the client DFS hit under 2000 neighbor radars", async () => {
+  const { pickRrmEvent, RadioEventStore, radarSessionAlerts, radioEventCorrelations } = await import("./radio.ts");
+  const t = 1_700_000_000;
+  const store = new RadioEventStore(["0a0027aa1103"]);
+  const buried = pickRrmEvent({
+    timestamp: t - 3600,
+    ap: "0a0027aa1103",
+    band: "5",
+    event: "rrm-radar",
+    channel: 149,
+    pre_channel: 36,
+  });
+  for (let i = 0; i < 2000; i++) {
+    store.add(
+      pickRrmEvent({
+        timestamp: t - i,
+        ap: "0a0027aa11ff",
+        band: "5",
+        event: "rrm-radar",
+        channel: 44,
+        pre_channel: 36,
+      }),
+    );
+  }
+  store.add(buried);
+  const sess = [{ ap: "0a0027aa1103", ssid: "c", band: "5", connect: t - 86400, disconnect: t, duration: 86400 }];
+  assert.equal(store.hitsForSession(sess[0]!).length, 1);
+  assert.equal(store.clientRadarEvents(sess).length, 1);
+  const exported = store.exportEvents();
+  assert.equal(exported.some((e) => e.ap === "0a0027aa11ff"), false);
+  assert.ok(store.radarsOnAp("0a0027aa11ff").length >= 1, "neighbor radar stays indexed");
+  assert.equal(radarSessionAlerts(exported, sess, [], null, store).length, 1);
+  assert.equal(
+    radioEventCorrelations(exported, [], sess, null, null, store).filter((c) => c.id.startsWith("radio-radar")).length,
+    1,
+  );
+});
+
+test("BSSID family + disconnect=0 + ap_mac field still alert", async () => {
+  const { pickRrmEvent, RadioEventStore, radarSessionAlerts, sessionCovers } = await import("./radio.ts");
+  const t = 1_700_000_000;
+  const store = new RadioEventStore(["0a0027aa1103"], [new Set(["0a0027aa1100", "0a0027aa1103"])]);
+  store.add(
+    pickRrmEvent({
+      timestamp: t - 10,
+      ap_mac: "0a0027aa1100",
+      band: "5",
+      event: "radar-detected",
+      channel: 100,
+      pre_channel: 36,
+    }),
+  );
+  const sess = [{ ap: "0a0027aa1103", ssid: "c", band: "5", connect: t - 60, disconnect: 0, duration: null }];
+  assert.equal(sessionCovers(sess[0]!, t - 10), true);
+  assert.equal(store.hitsForSession(sess[0]!).length, 1);
+  assert.equal(radarSessionAlerts(store.exportEvents(), sess, [], null, store).length, 1);
+});

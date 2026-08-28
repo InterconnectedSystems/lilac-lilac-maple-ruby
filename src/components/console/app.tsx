@@ -25,16 +25,20 @@ import { buildDemoResult, DEMO_MAC } from "@/lib/mist/demo-data";
 import { DEFAULT_HOST, MIST_HOSTS, type MistHost } from "@/lib/mist/hosts";
 import { filterOccupancy, type UniiFilter } from "@/lib/mist/occupancy";
 import { formatMac, normalizeMac } from "@/lib/mist/mac";
+import { bandHzLabel, arrowVals } from "@/lib/mist/radio";
 import { describeReason } from "@/lib/mist/reason-codes";
 import { rssiBand, snrBand, type Band } from "@/lib/mist/thresholds";
 import type {
   ApRadio,
+  ClientSession,
   Correlation,
   DiagnoseResult,
   DurationKey,
   MistOrg,
   MistSite,
   OccupancyBar,
+  RadarAlert,
+  RadioEvent,
   RfSample,
 } from "@/lib/mist/types";
 import { Button } from "@/components/ui/button";
@@ -143,6 +147,7 @@ export function ConsoleApp() {
           siteName: snap.siteName,
           mac: nmac,
           duration: snap.duration,
+          live: fromLive,
         },
       });
       setResult(res);
@@ -675,7 +680,7 @@ function BoardView({
         </form>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <p className="text-xs text-subtle">
-            Live mode re-queries per-MAC stats/events and this AP's occupancy. Auto-pauses on Mist 429.
+            Live mode re-queries client stats/events, 7-day radio events, Teams/Zoom calls, and this AP's occupancy. Auto-pauses on Mist 429.
           </p>
           <Button type="button" variant="ghost" className="px-3" onClick={onBack}>
             Back
@@ -683,10 +688,15 @@ function BoardView({
         </div>
       </div>
 
+      <RadarAlertBanner alerts={result.radarAlerts ?? []} />
+      <ClientRadarPanel events={result.clientRadarEvents ?? []} stats={result.radioStoreStats} />
+
       <div
         className={cn(
           "min-w-0 rounded-2xl border bg-surface p-4 sm:p-5",
-          result.verdict.label === "Critical" ? "border-crit/50 metric-crit" : "border-border",
+          result.verdict.label === "Critical" || (result.radarAlerts ?? []).length
+            ? "border-crit/50 metric-crit"
+            : "border-border",
         )}
       >
         <div className="flex flex-wrap items-center gap-3">
@@ -721,6 +731,8 @@ function BoardView({
       </section>
 
       <OccupancyPanel ap={result.apRadio} />
+      <RadioEventsPanel result={result} />
+      <CallsPanel result={result} />
 
       <div className="grid min-w-0 gap-3 grid-cols-2 lg:grid-cols-4">
         <Metric
@@ -762,8 +774,7 @@ function BoardView({
         </section>
       ) : null}
 
-      <div className="grid min-w-0 gap-4 lg:grid-cols-2">
-        <section className="min-w-0 rounded-2xl border border-border bg-surface p-4 sm:p-5">
+      <section className="min-w-0 rounded-2xl border border-border bg-surface p-4 sm:p-5">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-subtle">Identity / radio</h2>
           {!s ? (
             <p className="mt-3 text-sm text-muted">No live stats for this MAC on the site.</p>
@@ -789,33 +800,7 @@ function BoardView({
           )}
         </section>
 
-        <section className="min-w-0 rounded-2xl border border-border bg-surface p-4 sm:p-5">
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-subtle">Sessions</h2>
-          {!result.sessions.length ? (
-            <p className="mt-3 text-sm text-muted">No session records in this window.</p>
-          ) : (
-            <ul className="mt-3 divide-y divide-border">
-              {result.sessions.slice(0, 8).map((sess, i) => {
-                const short = sess.duration != null && sess.duration < 60;
-                return (
-                  <li key={`${sess.ap}-${sess.connect}-${i}`} className="py-2.5 text-sm">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="min-w-0 truncate font-mono text-xs text-muted">{sess.ap || "AP —"}</span>
-                      <span className={cn("shrink-0 font-mono tabular-nums", short ? "text-crit" : "text-fg")}>
-                        {fmtDuration(sess.duration)}
-                      </span>
-                    </div>
-                    <p className="text-xs text-subtle">
-                      {sess.ssid} · {sess.band || "band —"} · {fmtTime(sess.connect)}
-                      {sess.disconnect ? ` → ${fmtTime(sess.disconnect)}` : " (open)"}
-                    </p>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </section>
-      </div>
+      <SessionsPanel sessions={result.sessions} />
 
       <section className="min-w-0 rounded-2xl border border-border bg-surface p-4 sm:p-5">
         <h2 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-subtle">
@@ -1084,20 +1069,443 @@ function OccupancyChart({ bars }: { bars: OccupancyBar[] }) {
   );
 }
 
+function callQuality(q: number | null | undefined): string {
+  if (q == null) return "—";
+  if (q > 5) return `${q}%`;
+  return `${q}/5`;
+}
+
+function SessionRow({ s, tag }: { s: ClientSession; tag?: "radar" | "short" | null }) {
+  const name = s.apName || formatMac(s.ap || "");
+  const mac = s.ap ? formatMac(s.ap) : "";
+  const showMac = Boolean(s.apName && mac && !s.apName.includes(mac));
+  const radar = tag === "radar" || s.hitByRadar;
+  const short = s.duration != null && s.duration < 60;
+  return (
+    <tr className={radar ? "bg-crit/10" : undefined}>
+      <td className="py-2 pr-3 font-mono text-xs tabular-nums">{fmtTime(s.connect)}</td>
+      <td className="py-2 pr-3 font-mono text-xs tabular-nums">
+        {s.disconnect ? fmtTime(s.disconnect) : <span className="text-good">open</span>}
+      </td>
+      <td className={cn("py-2 pr-3 font-mono text-xs tabular-nums", short && "text-crit")}>
+        {fmtDuration(s.duration)}
+      </td>
+      <td className="py-2 pr-3 font-mono text-xs break-all">
+        {name}
+        {showMac ? ` · ${mac}` : ""}
+      </td>
+      <td className="py-2 pr-3 font-mono text-xs break-all">{s.ssid || "—"}</td>
+      <td className="py-2 pr-3 font-mono text-xs">{bandHzLabel(s.band)}</td>
+      <td className="py-2">
+        {radar ? (
+          <span className="rounded-full bg-surface-2 px-2 py-0.5 text-[11px] uppercase tracking-wide text-crit">
+            radar
+          </span>
+        ) : short ? (
+          <span className="rounded-full bg-surface-2 px-2 py-0.5 text-[11px] uppercase tracking-wide text-muted">
+            short
+          </span>
+        ) : null}
+      </td>
+    </tr>
+  );
+}
+
+function RadioRow({ ev }: { ev: RadioEvent }) {
+  const name = ev.apName || formatMac(ev.ap || "");
+  const hit = Boolean(ev.highlight);
+  const on = Boolean(ev.onClientAp);
+  const cls = hit ? "text-crit" : String(ev.event || "").includes("radar") ? "text-warn" : "";
+  return (
+    <tr className={hit ? "bg-crit/10 metric-crit" : on ? "bg-accent/10" : undefined}>
+      <td className="py-2 pr-3 font-mono text-xs text-subtle tabular-nums">{fmtTime(ev.timestamp)}</td>
+      <td className="py-2 pr-3 font-mono text-xs break-all">
+        {name}
+        {hit ? (
+          <span className="ml-1 rounded-full bg-surface-2 px-2 py-0.5 text-[11px] uppercase tracking-wide text-crit">
+            on this client
+          </span>
+        ) : on ? (
+          <span className="ml-1 rounded-full bg-surface-2 px-2 py-0.5 text-[11px] uppercase tracking-wide text-muted">
+            client AP
+          </span>
+        ) : null}
+      </td>
+      <td className="py-2 pr-3 font-mono text-xs">
+        {bandHzLabel(ev.preUsage || ev.band)} → {bandHzLabel(ev.usage || ev.band)}
+      </td>
+      <td className="py-2 pr-3 font-mono text-xs">{arrowVals(ev.preChannel, ev.channel)}</td>
+      <td className="py-2 pr-3 font-mono text-xs">{arrowVals(ev.preBandwidth, ev.bandwidth, " MHz")}</td>
+      <td className="py-2 pr-3 font-mono text-xs">{arrowVals(ev.prePower, ev.power, " dBm")}</td>
+      <td className={cn("py-2 font-mono text-xs", cls)}>{ev.label || ev.event || "—"}</td>
+    </tr>
+  );
+}
+
+function RadarAlertBanner({ alerts }: { alerts: RadarAlert[] }) {
+  if (!alerts.length) return null;
+  return (
+    <div className="grid gap-3">
+      {alerts.map((a) => {
+        const radios = a.radios?.length ? a.radios : a.radio ? [a.radio] : [];
+        return (
+        <section
+          key={a.id}
+          className="min-w-0 rounded-2xl border border-crit/70 bg-crit/10 p-4 sm:p-5 metric-crit"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm font-semibold uppercase tracking-wide text-crit">Alert · session on radar AP</p>
+            <span className="rounded-full border border-crit/40 px-2 py-0.5 text-[11px] uppercase tracking-wide text-crit">
+              DFS{radios.length > 1 ? ` · ${radios.length}` : ""}
+            </span>
+          </div>
+          <p className="mt-2 text-sm">{a.summary}</p>
+          {a.call ? (
+            <p className="mt-2 font-mono text-xs text-muted">
+              Call in progress: {a.call}
+              {a.meetingId ? ` · meeting ${a.meetingId}` : ""}
+              {a.callStart ? ` · ${fmtTime(a.callStart)}` : ""}
+              {a.callEnd ? ` → ${fmtTime(a.callEnd)}` : ""}
+            </p>
+          ) : null}
+          <p className="mt-4 text-[11px] uppercase tracking-wide text-subtle">This session</p>
+          <div className="mt-1 max-w-full overflow-x-auto">
+            <table className="w-full min-w-[40rem] text-left text-sm">
+              <thead>
+                <tr className="text-[11px] uppercase tracking-wide text-subtle">
+                  <th className="py-1 pr-3 font-medium">Connected</th>
+                  <th className="py-1 pr-3 font-medium">Disconnected</th>
+                  <th className="py-1 pr-3 font-medium">Duration</th>
+                  <th className="py-1 pr-3 font-medium">AP</th>
+                  <th className="py-1 pr-3 font-medium">SSID</th>
+                  <th className="py-1 pr-3 font-medium">Band</th>
+                  <th className="py-1 font-medium" />
+                </tr>
+              </thead>
+              <tbody>
+                <SessionRow s={a.session} tag="radar" />
+              </tbody>
+            </table>
+          </div>
+          <p className="mt-4 text-[11px] uppercase tracking-wide text-subtle">
+            {radios.length > 1 ? `These radar events (${radios.length})` : "This radar event"}
+          </p>
+          <div className="mt-1 max-h-[min(20rem,40vh)] max-w-full overflow-auto">
+            <table className="w-full min-w-[44rem] text-left text-sm">
+              <thead className="sticky top-0 bg-surface">
+                <tr className="text-[11px] uppercase tracking-wide text-subtle">
+                  <th className="py-1 pr-3 font-medium">Date</th>
+                  <th className="py-1 pr-3 font-medium">AP</th>
+                  <th className="py-1 pr-3 font-medium">Band</th>
+                  <th className="py-1 pr-3 font-medium">Channel</th>
+                  <th className="py-1 pr-3 font-medium">Width</th>
+                  <th className="py-1 pr-3 font-medium">Power</th>
+                  <th className="py-1 font-medium">Event</th>
+                </tr>
+              </thead>
+              <tbody>
+                {radios.map((ev, i) => (
+                  <RadioRow key={`${ev.timestamp}-${ev.ap}-${i}`} ev={ev} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+        );
+      })}
+    </div>
+  );
+}
+
+function ClientRadarPanel({
+  events,
+  stats,
+}: {
+  events: RadioEvent[];
+  stats?: DiagnoseResult["radioStoreStats"];
+}) {
+  const statsBit = stats?.scanned != null
+    ? ` Scanned ${stats.scanned} site radio events · indexed ${stats.radars} DFS/Post radar · ${events.length} overlapped this MAC's session on the same AP.`
+    : "";
+  if (!events.length) {
+    return (
+      <section className="min-w-0 rounded-2xl border border-border bg-surface p-4 sm:p-5">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-subtle">
+          Radar hits on this client's APs (0)
+        </h2>
+        <p className="mt-2 text-xs text-muted">
+          No DFS / Post radar overlapped a session on the same AP in this lookback.{statsBit} Neighbor-AP
+          radar is indexed in the radar store but is not this client's problem — it does not deauth this MAC.
+        </p>
+      </section>
+    );
+  }
+  return (
+    <section className="min-w-0 rounded-2xl border border-crit/55 bg-crit/10 p-4 sm:p-5">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-subtle">
+        Radar hits on this client's APs ({events.length})
+      </h2>
+      <p className="mt-1 text-xs text-muted">
+        Separate radar store — every DFS / Post radar on an AP this MAC was associated to in the lookback. Not
+        truncated by the site-wide Radio Events table. Same-AP + session overlap required.{statsBit}
+      </p>
+      <div className="mt-3 max-h-[min(28rem,55vh)] max-w-full overflow-auto">
+        <table className="w-full min-w-[44rem] text-left text-sm">
+          <thead className="sticky top-0 bg-surface">
+            <tr className="text-[11px] uppercase tracking-wide text-subtle">
+              <th className="py-1 pr-3 font-medium">Date</th>
+              <th className="py-1 pr-3 font-medium">AP</th>
+              <th className="py-1 pr-3 font-medium">Band</th>
+              <th className="py-1 pr-3 font-medium">Channel</th>
+              <th className="py-1 pr-3 font-medium">Width</th>
+              <th className="py-1 pr-3 font-medium">Power</th>
+              <th className="py-1 font-medium">Event</th>
+            </tr>
+          </thead>
+          <tbody>
+            {events.map((ev, i) => (
+              <RadioRow key={`${ev.timestamp}-${ev.ap}-${ev.event}-${i}`} ev={ev} />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function RadioEventsPanel({ result }: { result: DiagnoseResult }) {
+  const rows = result.radioEvents ?? [];
+  if (result.radioEventsUnavailable && !rows.length) {
+    return (
+      <section className="min-w-0 rounded-2xl border border-border bg-surface p-4 sm:p-5">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-subtle">Radio events</h2>
+        <p className="mt-3 text-sm text-muted">
+          Radio Management events not available ({result.radioEventsUnavailable}). This console queries GET
+          /sites/{"{id}"}/rrm/events?band=5|24|6 with start/end matching the lookback (band is required by Mist).
+        </p>
+      </section>
+    );
+  }
+  if (!rows.length) {
+    return (
+      <section className="min-w-0 rounded-2xl border border-border bg-surface p-4 sm:p-5">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-subtle">Radio events</h2>
+        <p className="mt-3 text-sm text-muted">
+          No Radio Management events in this lookback (scheduled RRM, Post radar, interference, neighbor AP).
+        </p>
+      </section>
+    );
+  }
+  const ranked = [...rows].sort((a, b) => {
+    const ha = a.highlight ? 1 : 0;
+    const hb = b.highlight ? 1 : 0;
+    if (hb !== ha) return hb - ha;
+    const oa = a.onClientAp ? 1 : 0;
+    const ob = b.onClientAp ? 1 : 0;
+    if (ob !== oa) return ob - oa;
+    return (b.timestamp || 0) - (a.timestamp || 0);
+  });
+  const hitN = rows.filter((e) => e.highlight).length;
+  return (
+    <section className="min-w-0 rounded-2xl border border-border bg-surface p-4 sm:p-5">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-subtle">Radio events ({ranked.length})</h2>
+      <p className="mt-1 text-xs text-muted">
+        Same source as Mist Site → Radio Management → Radio Events (this lookback, all bands).{" "}
+        <span className="text-crit">Post radar on the AP this client was connected to</span> is highlighted ({hitN}).
+        Scroll the box — the full kept list is here. Client-AP radar is never dropped; site-wide noise is sampled.
+      </p>
+      <div className="mt-3 max-h-[min(32rem,65vh)] max-w-full overflow-auto">
+        <table className="w-full min-w-[44rem] text-left text-sm">
+          <thead className="sticky top-0 bg-surface">
+            <tr className="text-[11px] uppercase tracking-wide text-subtle">
+              <th className="py-1 pr-3 font-medium">Date</th>
+              <th className="py-1 pr-3 font-medium">AP</th>
+              <th className="py-1 pr-3 font-medium">Band</th>
+              <th className="py-1 pr-3 font-medium">Channel</th>
+              <th className="py-1 pr-3 font-medium">Width</th>
+              <th className="py-1 pr-3 font-medium">Power</th>
+              <th className="py-1 font-medium">Event</th>
+            </tr>
+          </thead>
+          <tbody>
+            {ranked.map((ev, i) => (
+              <RadioRow key={`${ev.timestamp}-${ev.ap}-${ev.event}-${i}`} ev={ev} />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function CallsPanel({ result }: { result: DiagnoseResult }) {
+  const rows = result.calls ?? [];
+  if (result.callsUnavailable && !rows.length) {
+    return (
+      <section className="min-w-0 rounded-2xl border border-border bg-surface p-4 sm:p-5">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-subtle">Teams / collaboration calls</h2>
+        <p className="mt-3 text-sm text-muted">
+          No call records ({result.callsUnavailable}). Full Microsoft Teams QoS needs the org's Mist ↔ Teams
+          link under Organization → Settings → Integrations.
+        </p>
+      </section>
+    );
+  }
+  if (!rows.length) {
+    return (
+      <section className="min-w-0 rounded-2xl border border-border bg-surface p-4 sm:p-5">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-subtle">Teams / collaboration calls</h2>
+        <p className="mt-3 text-sm text-muted">
+          No Teams/Zoom/Webex calls for this MAC in the last 7 days.
+        </p>
+      </section>
+    );
+  }
+  const teams = rows.filter((c) => c.teams);
+  const poor = rows.filter((c) => c.poor);
+  return (
+    <section className="min-w-0 rounded-2xl border border-border bg-surface p-4 sm:p-5">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-subtle">
+        Teams / collaboration calls (7 days)
+      </h2>
+      <p className="mt-1 text-xs text-muted">
+        {teams.length} Microsoft Teams · {rows.length} total collab · {poor.length} poor audio/video/rating. Overlaps
+        with deauth are listed under Correlated causes.
+      </p>
+      <ul className="mt-3 space-y-2">
+        {rows.map((c, i) => (
+          <li
+            key={`${c.start}-${c.meetingId}-${i}`}
+            className={cn("rounded-lg border px-3 py-2", c.poor ? "border-crit/35 bg-surface-2" : "border-border")}
+          >
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <p className={cn("font-mono text-xs", c.poor ? "text-crit" : "text-good")}>
+                {c.appLabel}
+                {c.poor ? " · poor" : " · ok"}
+              </p>
+              <p className="font-mono text-xs text-subtle tabular-nums">
+                {fmtTime(c.start)}
+                {c.end ? ` → ${fmtTime(c.end)}` : ""}
+              </p>
+            </div>
+            <p className="mt-1 text-xs text-muted">
+              Audio {callQuality(c.audioQuality)} · Video {callQuality(c.videoQuality)}
+              {c.rating != null ? ` · user rating ${c.rating}` : ""} · {fmtDuration(c.duration)}
+              {c.meetingId ? ` · meeting ${c.meetingId}` : ""}
+            </p>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function SessionsPanel({ sessions }: { sessions: ClientSession[] }) {
+  const rows = [...sessions].sort((a, b) => (b.connect ?? 0) - (a.connect ?? 0));
+  if (!rows.length) {
+    return (
+      <section className="min-w-0 rounded-2xl border border-border bg-surface p-4 sm:p-5">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-subtle">Sessions</h2>
+        <p className="mt-3 text-sm text-muted">No session records in this window.</p>
+      </section>
+    );
+  }
+  const radarN = rows.filter((s) => s.hitByRadar).length;
+  const shortN = rows.filter((s) => s.duration != null && s.duration < 60).length;
+  const openN = rows.filter((s) => s.disconnect == null).length;
+  return (
+    <section className="min-w-0 rounded-2xl border border-border bg-surface p-4 sm:p-5">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-subtle">Sessions ({rows.length})</h2>
+      <p className="mt-1 text-xs text-muted">
+        Entire association history for this window, newest first. {openN} open · {radarN} during radar on that AP ·{" "}
+        {shortN} under 60s. Scroll the table — nothing is truncated.
+      </p>
+      <div className="mt-3 max-h-[min(32rem,65vh)] max-w-full overflow-auto">
+        <table className="w-full min-w-[40rem] text-left text-sm">
+          <thead className="sticky top-0 bg-surface">
+            <tr className="text-[11px] uppercase tracking-wide text-subtle">
+              <th className="py-1 pr-3 font-medium">Connected</th>
+              <th className="py-1 pr-3 font-medium">Disconnected</th>
+              <th className="py-1 pr-3 font-medium">Duration</th>
+              <th className="py-1 pr-3 font-medium">AP</th>
+              <th className="py-1 pr-3 font-medium">SSID</th>
+              <th className="py-1 pr-3 font-medium">Band</th>
+              <th className="py-1 font-medium" />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((s, i) => (
+              <SessionRow key={`${s.ap}-${s.connect}-${i}`} s={s} />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 function CorrelationCard({ c }: { c: Correlation }) {
   const tone =
     c.severity === "crit" ? "border-crit/40" : c.severity === "warn" ? "border-warn/40" : "border-border";
   const badge =
     c.severity === "crit" ? "text-crit" : c.severity === "warn" ? "text-warn" : "text-muted";
+  const d = c.detail;
   return (
-    <li className={cn("rounded-xl border bg-surface-2 px-3 py-3 sm:px-4", tone)}>
+    <li
+      className={cn(
+        "rounded-xl border bg-surface-2 px-3 py-3 sm:px-4",
+        tone,
+        c.highlight && "metric-crit border-crit/70",
+      )}
+    >
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <p className={cn("text-sm font-medium", badge)}>{c.title}</p>
         <p className="text-[11px] uppercase tracking-wide text-subtle">
+          {c.highlight ? "on this AP · " : ""}
           {c.confidence} · {c.severity}
         </p>
       </div>
       <p className="mt-1.5 text-sm text-muted">{c.evidence}</p>
+      {d ? (
+        <dl className="mt-3 grid grid-cols-[minmax(6.5rem,9rem)_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+          {d.call ? (
+            <>
+              <dt className="text-subtle">Teams / call</dt>
+              <dd className="font-mono break-all">
+                {d.call}
+                {d.meetingId ? ` · meeting ${d.meetingId}` : ""}
+              </dd>
+            </>
+          ) : null}
+          {d.radarEvent ? (
+            <>
+              <dt className="text-subtle">Radar event</dt>
+              <dd className="font-mono">{d.radarEvent}</dd>
+            </>
+          ) : null}
+          {d.radarTime ? (
+            <>
+              <dt className="text-subtle">Radar timestamp</dt>
+              <dd className="font-mono">{fmtTime(d.radarTime)}</dd>
+            </>
+          ) : null}
+          {d.clientApName || d.clientAp ? (
+            <>
+              <dt className="text-subtle">Client AP</dt>
+              <dd className="font-mono break-all">
+                {d.clientApName ? `${d.clientApName} · ` : ""}
+                {d.clientAp ? formatMac(d.clientAp) : ""}
+              </dd>
+            </>
+          ) : null}
+          {d.radarChannel ? (
+            <>
+              <dt className="text-subtle">Channel</dt>
+              <dd className="font-mono">{d.radarChannel}</dd>
+            </>
+          ) : null}
+        </dl>
+      ) : null}
     </li>
   );
 }

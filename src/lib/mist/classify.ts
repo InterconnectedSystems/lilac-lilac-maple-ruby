@@ -1,8 +1,17 @@
 import { buildCorrelations } from "./correlate.ts";
 import { rfOccupancyCorrelations } from "./occupancy.ts";
+import { callCorrelations, epochS, radioEventCorrelations, type RadioEventStore } from "./radio.ts";
 import { describeReason } from "./reason-codes.ts";
 import { num, rssiBand, snrBand } from "./thresholds.ts";
-import type { ApRadio, ClientEvent, ClientSession, ClientStats, HealthVerdict } from "./types.ts";
+import type {
+  ApRadio,
+  ClientEvent,
+  ClientSession,
+  ClientStats,
+  CollabCall,
+  HealthVerdict,
+  RadioEvent,
+} from "./types.ts";
 
 const NEGATIVE = [
   "DEAUTH",
@@ -20,11 +29,24 @@ const NEGATIVE = [
 
 export function isNegativeEvent(type: string, text: string): boolean {
   const hay = `${type} ${text}`.toUpperCase();
-  if (hay.includes("SUCCESS") || hay.includes("OK") || hay.includes("JOINED")) {
-    if (!hay.includes("FAIL")) return false;
+  if (hay.includes("DEAUTH") || hay.includes("DISASSOC")) return true;
+  const success =
+    hay.includes("SUCCESS") ||
+    hay.includes("_OK") ||
+    hay.includes(" OK") ||
+    hay.includes("JOINED") ||
+    hay.includes("ASSIGNED") ||
+    hay.includes("ASSOCIATION") ||
+    hay.includes("REASSOCIATION") ||
+    hay.includes("AUTHORIZATION");
+  if (
+    success &&
+    !["FAIL", "DENIED", "TIMEOUT", "TIMED_OUT", "TERMINATED", "BAD_IP", "BAD IP"].some((k) =>
+      hay.includes(k),
+    )
+  ) {
+    return false;
   }
-  // Do not treat AUTH as a substring — ASSOCIATION / AUTHORIZATION contain "AUTH"
-  // and would mark every successful join as a failure.
   return NEGATIVE.some((k) => hay.includes(k));
 }
 
@@ -83,12 +105,16 @@ export function pickEvent(raw: Record<string, unknown>): ClientEvent {
 }
 
 export function pickSession(raw: Record<string, unknown>): ClientSession {
+  const ap = String(raw.ap ?? raw.ap_mac ?? "");
+  const bssid = String(raw.bssid ?? "");
   return {
-    ap: String(raw.ap ?? ""),
+    ap: ap || bssid,
+    bssid,
+    apName: String(raw.ap_name ?? raw.apName ?? ""),
     ssid: String(raw.ssid ?? ""),
     band: String(raw.band ?? ""),
-    connect: num(raw.connect),
-    disconnect: num(raw.disconnect),
+    connect: epochS(raw.connect),
+    disconnect: epochS(raw.disconnect),
     duration: num(raw.duration),
   };
 }
@@ -98,12 +124,17 @@ export function buildVerdict(
   events: ClientEvent[],
   sessions: ClientSession[],
   apRadio: ApRadio | null = null,
+  radioEvents: RadioEvent[] = [],
+  calls: CollabCall[] = [],
+  radioStore: RadioEventStore | null = null,
 ): HealthVerdict {
   const notes: string[] = [];
   let score = 100;
   const correlations = [
     ...buildCorrelations(stats, events, sessions),
     ...rfOccupancyCorrelations(apRadio, stats),
+    ...radioEventCorrelations(radioEvents, events, sessions, stats, apRadio, radioStore),
+    ...callCorrelations(calls, events, sessions, stats, radioEvents, apRadio, radioStore),
   ];
 
   const rssi = stats?.rssi ?? null;
@@ -183,15 +214,29 @@ export function buildVerdict(
     notes.push(`Serving AP channel ${ch} has ${nw}% non-Wi-Fi occupancy.`);
   }
 
+  const radioHits = correlations.filter((c) => c.id.startsWith("radio-") && c.severity === "crit");
+  if (radioHits.length) {
+    score -= Math.min(18, 8 + 4 * radioHits.length);
+    notes.push(`${radioHits.length} Radio Management event(s) on the AP this client was connected to.`);
+  }
+  const callHits = correlations.filter((c) => c.id.startsWith("call-") && (c.severity === "crit" || c.severity === "warn"));
+  if (callHits.length) {
+    score -= Math.min(16, 6 + 3 * callHits.length);
+    notes.push(`${callHits.length} Teams/collaboration call issue(s) overlapping wireless events.`);
+  }
+
   const rank = { crit: 0, warn: 1, info: 2 };
   const conf = { high: 0, medium: 1, low: 2 };
   correlations.sort(
-    (a, b) => rank[a.severity] - rank[b.severity] || conf[a.confidence] - conf[b.confidence],
+    (a, b) =>
+      (a.highlight ? 0 : 1) - (b.highlight ? 0 : 1) ||
+      rank[a.severity] - rank[b.severity] ||
+      conf[a.confidence] - conf[b.confidence],
   );
   const seen = new Set<string>();
   const uniq = correlations.filter((c) => {
-    const key = c.id.replace(/-\d+$/, "");
-    if (seen.has(key)) return false;
+    const key = c.id;
+    if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;
   });

@@ -28,6 +28,7 @@ export const mistDiagnose = createServerFn({ method: "POST" })
       siteName: z.string().max(120),
       mac: z.string().min(12).max(32),
       duration: z.enum(["1h", "6h", "1d", "1w"]),
+      live: z.boolean().optional(),
     }),
   )
   .handler(async ({ data }) => diagnoseClient(data));

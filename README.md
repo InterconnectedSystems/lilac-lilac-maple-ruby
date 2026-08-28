@@ -2,11 +2,27 @@
 
 Client disconnect RCA for **Juniper Mist**. Paste an Observer (read-only) API token, pick a site and client MAC, and get a verdict that correlates RF, 802.11 reason codes, DHCP/DNS, Marvis, Radio Management occupancy, **7-day radio events (including Post radar / DFS)**, and **Microsoft Teams / Zoom calls**.
 
-**Latest: [v1.1](https://github.com/InterconnectedSystems/lilac-lilac-maple-ruby/releases/tag/v1.1)** — DFS radar session alerts, same-AP gating, full session history, portal-parity Radio Events.
+**Latest: [v1.2](https://github.com/InterconnectedSystems/lilac-lilac-maple-ruby/releases/tag/v1.2)** — AP-keyed radar store so DFS hits are not lost under a site radar storm. Same-AP gating from v1.1 is unchanged.
 
 Click **Run sample investigation** on the home page to walk the demo with no token. Sample data uses fictional `DEMO-AP-F2-*` names only.
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![Mist](https://img.shields.io/badge/Mist_API-GET_only-0B7A75) ![Token](https://img.shields.io/badge/Token-Observer_read--only-8FD0C4) ![Release](https://img.shields.io/badge/release-v1.1-8FD0C4)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![Mist](https://img.shields.io/badge/Mist_API-GET_only-0B7A75) ![Token](https://img.shields.io/badge/Token-Observer_read--only-8FD0C4) ![Release](https://img.shields.io/badge/release-v1.2-8FD0C4)
+
+---
+
+## What’s new in v1.2
+
+Code fixes. Same-AP radar correlation still requires a **session on the AP that took DFS**; neighbor radar is not a hit.
+
+| Fix | Why |
+|---|---|
+| **RadioEventStore** | Site RRM cannot filter by AP. Correlation now looks up radars by the session AP (and `radio_stat` BSSID aliases) instead of scanning the firehose. |
+| **Time-sliced fetch** | 24h / 7d lookbacks are split into windows so a radar storm in the last hour cannot hide a hit from hour 18. |
+| **Scrollable client-radar panel** | Dedicated “Radar hits on this client’s APs” table. Banner and radio-event tables scroll — the matching DFS row is no longer off-screen. |
+| **Open-session overlap** | Mist `disconnect: 0` is treated as still associated. RRM `ap` / `ap_mac` / BSSID aliases are accepted. |
+| **Faster login and live** | Token validate is `/self` only. Live polls walk the newest hour of RRM, not the full 7-day page walk. |
+
+Python `--self-test` covers a buried client DFS among 2,000 neighbor radars, BSSID-family match, and `disconnect: 0`.
 
 ---
 
@@ -32,7 +48,7 @@ Click **Run sample investigation** on the home page to walk the demo with no tok
 
 ---
 
-## Install and run (Python) — this is the v1.1 console
+## Install and run (Python) — this is the v1.2 console
 
 No pip packages. Windows, macOS, and Linux.
 
@@ -57,7 +73,7 @@ python3 mist_disconnect_console.py --self-test
 
 ## Install and run (web)
 
-The Vite / React tree in this repo is the published companion UI. **v1.1 radar / Teams / session-alert work is in `mist_disconnect_console.py`.** Use the Python command above for the current RCA engine.
+The Vite / React tree in this repo is the published companion UI. **v1.2 radar store / session-alert work is in `mist_disconnect_console.py` and `src/lib/mist/radio.ts`.** Use the Python command above for the local RCA engine.
 
 ```bash
 git clone https://github.com/InterconnectedSystems/lilac-lilac-maple-ruby.git
@@ -80,7 +96,7 @@ Captured from the built-in **sample investigation** (Sample HQ — Floor 2, fict
 
 The console only issues **GET** requests. Use an Observer / read-only token from **Organization → Settings → API Tokens**. Org Admin and write-enabled keys do not belong here.
 
-### Investigation board (v1.1)
+### Investigation board
 
 The banner is the first thing on the board when a session was on the radar AP.
 
@@ -126,10 +142,10 @@ Same stacked histogram Mist shows under **Site → Radio Management → Current 
 
 1. **Connect** — Select the Mist region (default `api.gc2.mist.com`) and paste an Observer token. `/self` validates the org.
 2. **Scope** — Pick org, site, client MAC, and lookback (`1h` / `6h` / `1d` / `1w`).
-3. **Diagnose** — Per-MAC stats, events, **all sessions** (paginated), Marvis, AP inventory, occupancy, **7-day RRM events by band**, Teams/Zoom calls.
+3. **Diagnose** — Per-MAC stats, events, **all sessions** (paginated), Marvis, AP inventory, occupancy, **RRM events by band** (time-sliced), Teams/Zoom calls.
 4. **Alert** — If a session covered a Post radar / radar-detected event **on that same AP**, the banner shows that session and that radio row.
 5. **Verdict** — Score + primary cause + same-AP radar / Teams correlations.
-6. **Live monitor** — Re-query (radio events + calls included). Auto-pauses on Mist HTTP 429.
+6. **Live monitor** — Re-query stats/events plus the newest hour of radio events. Auto-pauses on Mist HTTP 429.
 
 ---
 
@@ -137,7 +153,7 @@ Same stacked histogram Mist shows under **Site → Radio Management → Current 
 
 | Signal | Gate |
 |---|---|
-| **Post radar / DFS on the AP this session was on** | Session `connect…disconnect` covers the radar timestamp **and** `session.ap == radar.ap` |
+| **Post radar / DFS on the AP this session was on** | Session `connect…disconnect` covers the radar timestamp **and** `session.ap` (or BSSID family) equals the radar AP |
 | **Teams/Zoom in progress during that radar** | Call window overlaps the radar time **and** same-AP gate |
 | RSSI / SNR vs deauth reason | Coverage vs idle timeout vs handshake |
 | DHCP / DNS after roam or assoc | Failures only (not IP Assigned) |
@@ -154,7 +170,7 @@ A radar event on a different AP than the session is **dropped**. Same channel on
 
 The histogram is **this AP’s 20-minute RRM scan** (`/sites/{id}/rrm/current/devices/{device}/band/{band}`).
 
-Radio Events are `GET /sites/{id}/rrm/events?band={5\|24\|6}&duration=7d` (band is required; 400 `valid band is required` otherwise).
+Radio Events are `GET /sites/{id}/rrm/events?band={5\|24\|6}` with `start`/`end` matching the lookback (band is required; 400 `valid band is required` otherwise).
 
 ---
 
@@ -169,7 +185,7 @@ Radio Events are `GET /sites/{id}/rrm/events?band={5\|24\|6}&duration=7d` (band 
 | Marvis | `GET /orgs/{org}/troubleshoot` |
 | AP inventory + stats | `GET /sites/{site}/devices?type=ap`, `GET /sites/{site}/stats/devices` |
 | Occupancy | `GET /sites/{site}/rrm/current/devices/{device}/band/{24\|5\|6}` |
-| Radio events (7d) | `GET /sites/{site}/rrm/events?band={24\|5\|6}&duration=7d` |
+| Radio events | `GET /sites/{site}/rrm/events?band={24\|5\|6}&start=&end=` |
 | Teams / Zoom | `GET /sites/{site}/stats/calls/search?mac={mac}&duration=7d` |
 
 No configuration is written. The token stays in the browser tab and is never stored in a database.
@@ -187,7 +203,8 @@ No configuration is written. The token stays in the browser tab and is never sto
 ## Repo layout
 
 ```
-mist_disconnect_console.py   v1.1 RCA engine (stdlib only) — start here
+mist_disconnect_console.py   v1.2 RCA engine (stdlib only) — start here
+src/lib/mist/radio.ts        published companion radar store (same rules)
 screenshots/                 sample investigation captures (fictional DEMO-AP-F2 names)
-src/                         published web companion (v1.0 UI)
+src/                         published web companion
 ```
