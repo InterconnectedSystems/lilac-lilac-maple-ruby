@@ -2,11 +2,21 @@
 
 Client disconnect RCA for **Juniper Mist**. Paste an Observer (read-only) API token, pick a site and client MAC, and get a verdict that correlates RF, 802.11 reason codes, DHCP/DNS, Marvis, Radio Management occupancy, **7-day radio events (including Post radar / DFS)**, and **Microsoft Teams / Zoom calls**.
 
-**Latest: [v1.2.1](https://github.com/InterconnectedSystems/lilac-lilac-maple-ruby/releases/tag/v1.2.1)** — one radar banner per DFS hit, radio-events full screen, diagnose fetch hint.
+**Latest: [v1.2.2](https://github.com/InterconnectedSystems/lilac-lilac-maple-ruby/releases/tag/v1.2.2)** — lockfile sync so a clean install can publish.
 
 Click **Run sample investigation** on the home page to walk the demo with no token. Sample data uses fictional `DEMO-AP-F2-*` names only.
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![Mist](https://img.shields.io/badge/Mist_API-GET_only-0B7A75) ![Token](https://img.shields.io/badge/Token-Observer_read--only-8FD0C4) ![Release](https://img.shields.io/badge/release-v1.2.1-8FD0C4)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![Mist](https://img.shields.io/badge/Mist_API-GET_only-0B7A75) ![Token](https://img.shields.io/badge/Token-Observer_read--only-8FD0C4) ![Release](https://img.shields.io/badge/release-v1.2.2-8FD0C4)
+
+---
+
+## What’s new in v1.2.2
+
+Publish install fix only. No RCA engine change.
+
+| Fix | Why |
+|---|---|
+| **Lockfile in sync** | A clean `npm ci` failed (`ajv` 6 vs 8). The companion site can install and publish again. |
 
 ---
 
