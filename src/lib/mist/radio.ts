@@ -108,8 +108,8 @@ export function isTeamsApp(app: unknown): boolean {
 
 export function pickCall(raw: Record<string, unknown>): CollabCall {
   const app = String(raw.app ?? "unknown");
-  const start = num(raw.start_time ?? raw.start);
-  const end = num(raw.end_time ?? raw.end);
+  const start = epochS(raw.start_time ?? raw.start);
+  const end = epochS(raw.end_time ?? raw.end);
   const duration = start != null && end != null && end > start ? end - start : null;
   const audioQuality = num(raw.audio_quality);
   const videoQuality = num(raw.video_quality);
@@ -145,6 +145,10 @@ export function sameApMac(a: unknown, b: unknown): boolean {
 export function isRadarEvent(ev: Pick<RadioEvent, "event">): boolean {
   const e = String(ev.event || "").toLowerCase();
   return e === "radar-detected" || e === "rrm-radar" || e.includes("radar");
+}
+
+export function radarEventSig(re: Pick<RadioEvent, "ap" | "timestamp" | "event" | "channel">): string {
+  return `${hexMac(re.ap)}|${Math.trunc(epochS(re.timestamp) ?? 0)}|${re.event || ""}|${re.channel ?? ""}`;
 }
 
 export function epochS(v: unknown): number | null {
@@ -405,11 +409,22 @@ export class RadioEventStore {
   }
 
   hitsForSessions(sessions: ClientSession[] | null | undefined): { sess: ClientSession; re: RadioEvent }[] {
-    const pairs: { sess: ClientSession; re: RadioEvent }[] = [];
+    const best = new Map<string, { sess: ClientSession; re: RadioEvent }>();
     for (const s of sessions ?? []) {
-      for (const re of this.hitsForSession(s)) pairs.push({ sess: s, re });
+      for (const re of this.hitsForSession(s)) {
+        const sig = radarEventSig(re);
+        const prev = best.get(sig);
+        if (!prev) {
+          best.set(sig, { sess: s, re });
+          continue;
+        }
+        const better =
+          (s.duration ?? 0) > (prev.sess.duration ?? 0) ||
+          ((s.duration ?? 0) === (prev.sess.duration ?? 0) && (epochS(s.connect) ?? 0) < (epochS(prev.sess.connect) ?? 0));
+        if (better) best.set(sig, { sess: s, re });
+      }
     }
-    return pairs;
+    return [...best.values()];
   }
 
   clientRadarEvents(sessions: ClientSession[] | null | undefined): RadioEvent[] {
@@ -603,6 +618,66 @@ export function attachApNames<T extends { ap?: string; apName?: string }>(
   return rows;
 }
 
+function alertSessionWindow(a: RadarAlert): [number, number] {
+  const start = epochS(a.sessionConnect) ?? 0;
+  let end = epochS(a.sessionDisconnect);
+  if (end == null || end === 0 || end < start) end = start + 1e12;
+  return [start, end];
+}
+
+function dedupeAlertRadios(radios: RadioEvent[]): RadioEvent[] {
+  const seen = new Set<string>();
+  const out: RadioEvent[] = [];
+  for (const r of radios) {
+    const sig = radarEventSig(r);
+    if (seen.has(sig)) continue;
+    seen.add(sig);
+    out.push(r);
+  }
+  return out;
+}
+
+function foldOverlappingRadarAlerts(
+  alerts: RadarAlert[],
+  store: RadioEventStore | null | undefined,
+): RadarAlert[] {
+  if (alerts.length <= 1) return alerts;
+  const apKey = (a: RadarAlert) => (store ? store.key(a.sessionAp) : hexMac(a.sessionAp));
+  const out: RadarAlert[] = [];
+  for (const a of alerts) {
+    const [as, ae] = alertSessionWindow(a);
+    let placed = false;
+    for (const host of out) {
+      let related = apKey(host) === apKey(a);
+      if (!related && store) related = store.related(host.sessionAp, a.sessionAp);
+      if (!related) continue;
+      const [hs, he] = alertSessionWindow(host);
+      if (as - 2 > he || hs - 2 > ae) continue;
+      host.radios = [...(host.radios ?? [host.radio]), ...(a.radios ?? [a.radio])];
+      if (!host.call && a.call) {
+        host.call = a.call;
+        host.meetingId = a.meetingId;
+        host.callStart = a.callStart;
+        host.callEnd = a.callEnd;
+      }
+      if ((a.sessionDuration ?? 0) > (host.sessionDuration ?? 0)) {
+        host.session = a.session;
+        host.sessionConnect = a.sessionConnect;
+        host.sessionDisconnect = a.sessionDisconnect;
+        host.sessionDuration = a.sessionDuration;
+        host.sessionAp = a.sessionAp;
+        host.sessionApName = a.sessionApName;
+        host.summary = a.summary;
+        host.title = a.title;
+      }
+      placed = true;
+      break;
+    }
+    if (!placed) out.push(a);
+  }
+  return out;
+}
+
 export function radarSessionAlerts(
   radioEvents: RadioEvent[],
   sessions: ClientSession[] | null | undefined,
@@ -672,7 +747,7 @@ export function radarSessionAlerts(
   const grouped = new Map<string, RadarAlert>();
   const order: string[] = [];
   for (const a of raw) {
-    const key = `${a.sessionAp}|${a.sessionConnect}`;
+    const key = `${st.key(a.sessionAp)}|${Math.trunc(epochS(a.sessionConnect) ?? 0)}`;
     const host = grouped.get(key);
     if (!host) {
       grouped.set(key, a);
@@ -687,10 +762,10 @@ export function radarSessionAlerts(
       host.callEnd = a.callEnd;
     }
   }
+  const folded = foldOverlappingRadarAlerts(order.map((k) => grouped.get(k)!), st);
   const out: RadarAlert[] = [];
-  for (const key of order) {
-    const a = grouped.get(key)!;
-    const radios = [...(a.radios ?? (a.radio ? [a.radio] : []))].sort(
+  for (const a of folded) {
+    const radios = dedupeAlertRadios(a.radios ?? (a.radio ? [a.radio] : [])).sort(
       (x, y) => (y.timestamp || 0) - (x.timestamp || 0),
     );
     a.radios = radios;
@@ -701,15 +776,22 @@ export function radarSessionAlerts(
         `This client's session on ${a.sessionApName} (${formatMac(a.sessionAp)}) ` +
         `was associated while ${radios.length} DFS / Post radar events hit that same AP. ` +
         "Each event is listed under this banner. DFS vacates 5 GHz and deauthenticates every associated station.";
-      a.id = `session-radar-${a.sessionConnect}-${a.sessionAp}`;
+      a.id = `session-radar-${Math.trunc(epochS(a.sessionConnect) ?? 0)}-${a.sessionAp}`;
     }
     out.push(a);
   }
   for (const s of sessions ?? []) {
-    s.radarHits = out
-      .filter((a) => sameApMac(s.ap, a.sessionAp) && s.connect === a.sessionConnect)
-      .flatMap((a) => (a.radios ?? [a.radio]).map((r) => r.timestamp ?? 0));
-    s.hitByRadar = Boolean(s.radarHits.length);
+    const hits: number[] = [];
+    for (const a of out) {
+      let related = sameApMac(s.ap, a.sessionAp) || sameApMac(s.bssid, a.sessionAp);
+      if (!related) related = st.related(s.ap, a.sessionAp);
+      if (!related) continue;
+      for (const r of a.radios ?? [a.radio]) {
+        if (sessionCovers(s, epochS(r.timestamp) ?? 0)) hits.push(r.timestamp ?? 0);
+      }
+    }
+    s.radarHits = hits;
+    s.hitByRadar = Boolean(hits.length);
   }
   return out;
 }
@@ -855,9 +937,10 @@ export function radioEventCorrelations(
 }
 
 export function callOpenAt(call: CollabCall, t: number): boolean {
-  const start = call.start || 0;
-  const end = call.end || start;
-  return start - WINDOW_CALL_S <= t && t <= end + WINDOW_CALL_S;
+  const ts = epochS(t) ?? 0;
+  const start = epochS(call.start) ?? 0;
+  const end = epochS(call.end) ?? start;
+  return start - WINDOW_CALL_S <= ts && ts <= end + WINDOW_CALL_S;
 }
 
 export function callCorrelations(
@@ -890,23 +973,28 @@ export function callCorrelations(
     const roamHits = roams.filter((d) => callOpenAt(c, d.timestamp || 0));
     const dhcpHits = dhcpFail.filter((d) => callOpenAt(c, d.timestamp || 0));
     const hsHits = handshake.filter((d) => callOpenAt(c, d.timestamp || 0));
-    const radarHits = store
-      ? (() => {
-          const seen = new Set<string>();
-          const rows: RadioEvent[] = [];
-          for (const { re } of store.hitsForSessions(sessions)) {
-            if (!callOpenAt(c, epochS(re.timestamp) ?? 0)) continue;
-            const sig = `${re.ap}|${re.timestamp}|${re.event}`;
-            if (seen.has(sig)) continue;
-            seen.add(sig);
-            rows.push(re);
-          }
-          rows.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-          return rows;
-        })()
-      : radars
-          .filter((re) => callOpenAt(c, epochS(re.timestamp) ?? 0) && radarHitsThisClient(re, sessions, events, stats).same)
-          .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    const radarHits = (() => {
+      const seen = new Set<string>();
+      const rows: RadioEvent[] = [];
+      const take = (re: RadioEvent) => {
+        const sig = `${re.ap}|${re.timestamp}|${re.event}`;
+        if (seen.has(sig)) return;
+        if (!callOpenAt(c, epochS(re.timestamp) ?? 0)) return;
+        seen.add(sig);
+        rows.push(re);
+      };
+      if (store) {
+        for (const { re } of store.hitsForSessions(sessions)) take(re);
+      }
+      if (!rows.length) {
+        for (const re of radars) {
+          if (!radarHitsThisClient(re, sessions, events, stats).same) continue;
+          take(re);
+        }
+      }
+      rows.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+      return rows;
+    })();
     const start = c.start || 0;
 
     if (radarHits.length) {

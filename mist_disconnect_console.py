@@ -1249,11 +1249,28 @@ class RadioEventStore:
         return out
 
     def hits_for_sessions(self, sessions: list | None) -> list[tuple[dict, dict]]:
-        pairs = []
+        """Each radar row is attached to at most one covering session.
+
+        Mist session search often returns two near-duplicate associations
+        (connect times a fraction of a second apart). Matching both prints
+        two identical session-on-radar banners for one DFS hit.
+        """
+        best: dict[tuple, tuple[dict, dict]] = {}
         for s in sessions or []:
             for re in self.hits_for_session(s):
-                pairs.append((s, re))
-        return pairs
+                sig = radar_event_sig(re)
+                prev = best.get(sig)
+                if prev is None:
+                    best[sig] = (s, re)
+                    continue
+                ps, _pr = prev
+                better = (float(s.get("duration") or 0), -float(epoch_s(s.get("connect")) or 0)) > (
+                    float(ps.get("duration") or 0),
+                    -float(epoch_s(ps.get("connect")) or 0),
+                )
+                if better:
+                    best[sig] = (s, re)
+        return list(best.values())
 
     def client_radar_events(self, sessions: list | None) -> list[dict]:
         seen: set[tuple] = set()
@@ -1358,6 +1375,18 @@ def annotate_radio_events(
 def is_radar_event(ev: dict) -> bool:
     e = str(ev.get("event") or "").lower()
     return e in {"radar-detected", "rrm-radar"} or "radar" in e
+
+
+def radar_event_sig(re: dict | None) -> tuple:
+    """Identity of one DFS/Post radar row. Timestamps collapse to whole seconds."""
+    if not re:
+        return ("", 0, "", None)
+    return (
+        hex_mac(re.get("ap")),
+        int(epoch_s(re.get("timestamp")) or 0),
+        str(re.get("event") or ""),
+        re.get("channel"),
+    )
 
 
 def power_changed(ev: dict) -> bool:
@@ -1481,6 +1510,71 @@ def session_on_ap_at(sessions: list | None, t: float, ap: Any) -> dict | None:
     return hits[0]
 
 
+def _alert_session_window(a: dict) -> tuple[float, float]:
+    start = float(epoch_s(a.get("sessionConnect")) or 0)
+    end = epoch_s(a.get("sessionDisconnect"))
+    if end is None or float(end) == 0 or float(end) < start:
+        end = start + 10**12
+    return start, float(end)
+
+
+def _dedupe_alert_radios(radios: list) -> list:
+    seen: set[tuple] = set()
+    out: list = []
+    for r in radios or []:
+        if not r:
+            continue
+        sig = radar_event_sig(r)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append(r)
+    return out
+
+
+def _fold_overlapping_radar_alerts(alerts: list[dict], store: RadioEventStore | None) -> list[dict]:
+    """One banner per AP association. Near-duplicate session rows collapse."""
+    if len(alerts) <= 1:
+        return alerts
+
+    def ap_key(a: dict) -> str:
+        h = hex_mac(a.get("sessionAp"))
+        return store.key(h) if store is not None else h
+
+    out: list[dict] = []
+    for a in alerts:
+        as_, ae = _alert_session_window(a)
+        placed = False
+        for host in out:
+            related = ap_key(host) == ap_key(a)
+            if not related and store is not None:
+                related = store.related(host.get("sessionAp"), a.get("sessionAp"))
+            if not related:
+                continue
+            hs, he = _alert_session_window(host)
+            if as_ - 2 > he or hs - 2 > ae:
+                continue
+            host.setdefault("radios", [host["radio"]] if host.get("radio") else [])
+            host["radios"].extend(a.get("radios") or ([a.get("radio")] if a.get("radio") else []))
+            if not host.get("call") and a.get("call"):
+                host["call"] = a.get("call")
+                host["meetingId"] = a.get("meetingId")
+                host["callStart"] = a.get("callStart")
+                host["callEnd"] = a.get("callEnd")
+            if (a.get("sessionDuration") or 0) > (host.get("sessionDuration") or 0):
+                for k in (
+                    "session", "sessionConnect", "sessionDisconnect", "sessionDuration",
+                    "sessionAp", "sessionApName", "summary", "title",
+                ):
+                    if a.get(k) is not None:
+                        host[k] = a.get(k)
+            placed = True
+            break
+        if not placed:
+            out.append(a)
+    return out
+
+
 def radar_session_alerts(
     radio_events: list,
     sessions: list | None,
@@ -1509,6 +1603,15 @@ def radar_session_alerts(
             sess = session_on_ap_at(sessions, ts, re.get("ap"))
             if sess:
                 pairs.append((sess, re))
+    seen_pair: set[tuple] = set()
+    unique_pairs: list[tuple[dict, dict]] = []
+    for sess, re in pairs:
+        sig = radar_event_sig(re)
+        if sig in seen_pair:
+            continue
+        seen_pair.add(sig)
+        unique_pairs.append((sess, re))
+    pairs = unique_pairs
     for sess, re in pairs:
         ts = float(epoch_s(re.get("timestamp")) or 0)
         ap_mac = hex_mac(sess.get("ap"))
@@ -1589,8 +1692,13 @@ def radar_session_alerts(
 
     grouped: dict[tuple, dict] = {}
     order: list[tuple] = []
+
+    def _canon_ap(mac: Any) -> str:
+        h = hex_mac(mac)
+        return store.key(h) if store is not None else h
+
     for a in raw:
-        key = (a.get("sessionAp"), a.get("sessionConnect"))
+        key = (_canon_ap(a.get("sessionAp")), int(epoch_s(a.get("sessionConnect")) or 0))
         if key not in grouped:
             grouped[key] = a
             order.append(key)
@@ -1603,10 +1711,10 @@ def radar_session_alerts(
             host["meetingId"] = a.get("meetingId")
             host["callStart"] = a.get("callStart")
             host["callEnd"] = a.get("callEnd")
+    folded = _fold_overlapping_radar_alerts([grouped[k] for k in order], store)
     out: list[dict] = []
-    for key in order:
-        a = grouped[key]
-        radios = a.get("radios") or ([a["radio"]] if a.get("radio") else [])
+    for a in folded:
+        radios = _dedupe_alert_radios(a.get("radios") or ([a["radio"]] if a.get("radio") else []))
         radios.sort(key=lambda r: epoch_s(r.get("timestamp")) or 0, reverse=True)
         a["radios"] = radios
         a["radio"] = radios[0] if radios else a.get("radio")
@@ -1618,18 +1726,22 @@ def radar_session_alerts(
                 f"was associated while {n} DFS / Post radar events hit that same AP. "
                 "Each event is listed under this banner. DFS vacates 5 GHz and deauthenticates every associated station."
             )
-            a["id"] = f"session-radar-{a.get('sessionConnect')}-{a.get('sessionAp')}"
+            a["id"] = f"session-radar-{int(epoch_s(a.get('sessionConnect')) or 0)}-{a.get('sessionAp')}"
         out.append(a)
 
     for s in sessions or []:
-        s["radarHits"] = [
-            r.get("timestamp")
-            for a in out
-            if same_ap_mac(s.get("ap"), a.get("sessionAp")) and s.get("connect") == a.get("sessionConnect")
-            for r in (a.get("radios") or [a.get("radio")])
-            if r
-        ]
-        s["hitByRadar"] = bool(s.get("radarHits"))
+        hits = []
+        for a in out:
+            related = same_ap_mac(s.get("ap"), a.get("sessionAp")) or same_ap_mac(s.get("bssid"), a.get("sessionAp"))
+            if not related and store is not None:
+                related = store.related(s.get("ap"), a.get("sessionAp"))
+            if not related:
+                continue
+            for r in a.get("radios") or ([a.get("radio")] if a.get("radio") else []):
+                if r and session_covers(s, epoch_s(r.get("timestamp")) or 0):
+                    hits.append(r.get("timestamp"))
+        s["radarHits"] = hits
+        s["hitByRadar"] = bool(hits)
     return out
 
 
@@ -1891,23 +2003,25 @@ def call_correlations(
         dhcp_hits = [d for d in dhcp_fail if _call_open_at(c, float(d.get("timestamp") or 0))]
         hs_hits = [d for d in handshake if _call_open_at(c, float(d.get("timestamp") or 0))]
         radar_hits = []
+        seen_r: set[tuple] = set()
+
+        def _take_call_radar(re: dict) -> None:
+            if not _call_open_at(c, float(epoch_s(re.get("timestamp")) or 0)):
+                return
+            sig = (re.get("ap"), re.get("timestamp"), re.get("event"))
+            if sig in seen_r:
+                return
+            seen_r.add(sig)
+            radar_hits.append(re)
+
         if store is not None:
-            seen_r: set[tuple] = set()
             for _sess, re in store.hits_for_sessions(sessions):
-                if not _call_open_at(c, float(epoch_s(re.get("timestamp")) or 0)):
-                    continue
-                sig = (re.get("ap"), re.get("timestamp"), re.get("event"))
-                if sig in seen_r:
-                    continue
-                seen_r.add(sig)
-                radar_hits.append(re)
-        else:
+                _take_call_radar(re)
+        if not radar_hits:
             for re in radars:
-                if not _call_open_at(c, float(epoch_s(re.get("timestamp")) or 0)):
-                    continue
                 same, _on = radar_hits_this_client(re, sessions or [], events or [], stats)
                 if same:
-                    radar_hits.append(re)
+                    _take_call_radar(re)
         radar_hits.sort(key=lambda r: epoch_s(r.get("timestamp")) or 0)
         start = float(epoch_s(c.get("start")) or 0)
 
@@ -3133,9 +3247,9 @@ def demo_result(jitter: bool = False) -> dict:
             "audio_quality": 4, "video_quality": 4,
         }),
     ]
-    radar_alerts = radar_session_alerts(radio_events, sessions, calls, ap_radio)
     demo_store = RadioEventStore({hex_mac(s.get("ap")) for s in sessions})
     demo_store.add_many(radio_events)
+    radar_alerts = radar_session_alerts(radio_events, sessions, calls, ap_radio, demo_store)
     client_radar = demo_store.client_radar_events(sessions)
     return {
         "demo": True,
@@ -3243,6 +3357,13 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; background:var(--surface-2);
 .ap-table td { padding:.45rem .5rem .45rem 0; border-top:1px solid var(--border); }
 .sess-scroll { max-height:min(32rem, 65vh); overflow:auto; -webkit-overflow-scrolling:touch; }
 .radar-scroll { max-height:min(20rem, 40vh); overflow:auto; -webkit-overflow-scrolling:touch; }
+.radio-fs { position:fixed; inset:0; z-index:80; background:var(--bg); display:flex; flex-direction:column;
+  padding: max(.75rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left)); }
+.radio-fs-inner { flex:1; min-height:0; display:flex; flex-direction:column; overflow:hidden; margin:0; }
+.radio-fs-inner .sess-scroll { max-height:none; flex:1 1 auto; min-height:0; }
+.radio-fs-head { flex:none; margin-bottom:.35rem; align-items:flex-start; }
+body.radio-fs-open { overflow:hidden; }
+#btnRadioFs { flex:none; min-height:44px; }
 .ap-table tr.radar td { background:color-mix(in oklab, var(--crit) 10%, transparent); }
 .occ-scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; }
 .chiprow { display:flex; flex-wrap:wrap; gap:.35rem; align-items:center; }
@@ -3315,6 +3436,7 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; background:var(--surface-2);
         </select>
       </label>
       <button class="btn btn-p" type="submit" id="btnDiag">Diagnose</button>
+      <p class="muted" id="fetchHint" style="margin:-.45rem 0 0;font-size:12px">If the site has a lot of devices and a lot of events, fetching can take up to 60 seconds.</p>
     </form>
   </section>
   <section id="viewBoard" class="hidden stack"></section>
@@ -3325,7 +3447,7 @@ const HOSTS = ["api.gc2.mist.com","api.mist.com","api.gc1.mist.com","api.ac2.mis
 const $ = (id) => document.getElementById(id);
 const hostSel = $("host");
 HOSTS.forEach(h => { const o=document.createElement("option"); o.value=h; o.textContent=h+(h==="api.gc2.mist.com"?" (default)":""); hostSel.appendChild(o); });
-const state = { token:"", host:"api.gc2.mist.com", orgs:[], orgId:"", sites:[], siteId:"", mac:"", duration:"1d", result:null, live:false, liveSec:15, timer:null, samples:[], busy:false, demo:false, email:"", occFilter:"all" };
+const state = { token:"", host:"api.gc2.mist.com", orgs:[], orgId:"", sites:[], siteId:"", mac:"", duration:"1d", result:null, live:false, liveSec:15, timer:null, samples:[], busy:false, demo:false, email:"", occFilter:"all", radioFs:false };
 
 function show(id) {
   ["viewConnect","viewScope","viewBoard"].forEach(v => $(v).classList.toggle("hidden", v!==id));
@@ -3379,7 +3501,7 @@ async function loadSites(){
 }
 function fillSelect(el, items){ el.innerHTML=""; items.forEach(it=>{ const o=document.createElement("option"); o.value=it.id; o.textContent=it.name; el.appendChild(o); }); if(items[0]) el.value=items[0].id; }
 $("formScope").onsubmit = async (e) => { e.preventDefault(); state.mac=$("mac").value; state.duration=$("duration").value; state.siteId=$("site").value; state.orgId=$("org").value; await runDiag(false); };
-$("btnSession").onclick = () => { setLive(false); state.result=null; show("viewConnect"); };
+$("btnSession").onclick = () => { setLive(false); state.result=null; state.radioFs=false; document.body.classList.remove("radio-fs-open"); show("viewConnect"); };
 
 async function runDiag(fromLive){
   if(state.busy && fromLive) return;
@@ -3401,6 +3523,12 @@ function setLive(on){
   if(state.timer){ clearInterval(state.timer); state.timer=null; }
   if(on){ state.timer=setInterval(()=>{ if(document.hidden) return; runDiag(true); }, state.liveSec*1000); }
 }
+document.addEventListener("keydown", (e)=>{
+  if(e.key!=="Escape" || !state.radioFs) return;
+  state.radioFs=false;
+  document.body.classList.remove("radio-fs-open");
+  if(state.result) renderBoard();
+});
 
 function spark(samples, field){
   const pts=samples.map(s=>s[field]).filter(v=>v!=null);
@@ -3584,10 +3712,13 @@ function arrow(a,b,unit){
 }
 function clientRadarPanel(r){
   const rows = r.clientRadarEvents||[];
+  const alerts = r.radarAlerts||[];
   const st = r.radioStoreStats||{};
   const statsBit = st.scanned!=null
     ? ` Scanned ${st.scanned} site radio events · indexed ${st.radars||0} DFS/Post radar · ${rows.length} overlapped this MAC's session on the same AP.`
     : "";
+  // The session-on-radar banner already lists these same DFS rows. Do not paint them twice.
+  if(alerts.length) return "";
   if(!rows.length){
     return `<div class="card">
       <h2 class="subtle" style="margin:0 0 .35rem;font-size:13px;text-transform:uppercase">Radar hits on this client's APs (0)</h2>
@@ -3623,9 +3754,13 @@ function radioEventsPanel(r){
     return (Number(b.timestamp)||0)-(Number(a.timestamp)||0);
   });
   const hitN = rows.filter(e=>e.highlight).length;
-  return `<div class="card"><h2 class="subtle" style="margin:0 0 .35rem;font-size:13px;text-transform:uppercase">Radio events (${ranked.length})</h2>
-    <p class="muted" style="margin:0 0 .7rem;font-size:12px">Same source as Mist <span style="color:var(--fg)">Site → Radio Management → Radio Events</span> for this lookback. <strong style="color:var(--crit)">Post radar on the AP this client was connected to</strong> is highlighted (${hitN}). Scroll the box — the full kept list is here (site-wide noise is filtered to a sample; client-AP radar is never dropped).</p>
-    <div class="sess-scroll occ-scroll">
+  const fs = !!state.radioFs;
+  const head = `<div class="row radio-fs-head">
+      <h2 class="subtle" id="radioEventsTitle" style="margin:0;font-size:13px;text-transform:uppercase">Radio events (${ranked.length})</h2>
+      <button class="btn btn-s" type="button" id="btnRadioFs" aria-pressed="${fs?"true":"false"}">${fs?"Exit full screen":"Full screen"}</button>
+    </div>`;
+  const body = `<p class="muted" style="margin:0 0 .7rem;font-size:12px">Same source as Mist <span style="color:var(--fg)">Site → Radio Management → Radio Events</span> for this lookback. <strong style="color:var(--crit)">Post radar on the AP this client was connected to</strong> is highlighted (${hitN}). Scroll the box — the full kept list is here (site-wide noise is filtered to a sample; client-AP radar is never dropped).${fs?" Esc exits full screen.":""}</p>
+    <div class="sess-scroll occ-scroll" id="radioEventsScroll">
     <table class="ap-table">
       <thead><tr>
         <th>Date</th><th>AP</th><th>Band</th><th>Channel</th><th>Width</th><th>Power</th><th>Event</th>
@@ -3648,8 +3783,13 @@ function radioEventsPanel(r){
       }).join("")}
       </tbody>
     </table>
-    </div>
-  </div>`;
+    </div>`;
+  if(fs){
+    return `<div class="radio-fs" id="radioEventsCard" role="dialog" aria-modal="true" aria-labelledby="radioEventsTitle">
+      <div class="card radio-fs-inner">${head}${body}</div>
+    </div>`;
+  }
+  return `<div class="card" id="radioEventsCard">${head}${body}</div>`;
 }
 function callQuality(q){
   if(q==null||q==="") return "—";
@@ -3746,10 +3886,27 @@ function radioRow(ev){
     <td class="mono crit">${esc(ev.label||ev.event||"—")}</td>
   </tr>`;
 }
+function uniqueRadarAlerts(alerts){
+  const seen=new Set();
+  const out=[];
+  for(const a of alerts||[]){
+    const rt=a.radarTime!=null?a.radarTime:(a.radio&&a.radio.timestamp);
+    const k=String(a.id||"")+"|"+(a.sessionAp||"")+"|"+Math.trunc(Number(a.sessionConnect)||0)+"|"+String(rt||"")+"|"+String(a.radarEvent||"");
+    if(seen.has(k)) continue;
+    seen.add(k);
+    out.push(a);
+  }
+  return out;
+}
 function radarAlertBanner(r){
-  const alerts=r.radarAlerts||[];
+  const alerts=uniqueRadarAlerts(r.radarAlerts||[]);
   if(!alerts.length) return "";
-  return alerts.map(a=>{
+  const st = r.radioStoreStats||{};
+  const n = (r.clientRadarEvents||[]).length;
+  const statsBit = st.scanned!=null
+    ? `<p class="muted" style="margin:.85rem 0 0;font-size:12px">Scanned ${esc(st.scanned)} site radio events · indexed ${esc(st.radars||0)} DFS/Post radar · ${n} overlapped this MAC's session on the same AP.</p>`
+    : "";
+  return alerts.map((a,i)=>{
     const radios = (a.radios && a.radios.length) ? a.radios : (a.radio ? [a.radio] : []);
     return `
     <div class="card pulse-c" style="border-color:color-mix(in oklab, var(--crit) 75%, var(--border));background:color-mix(in oklab, var(--crit) 10%, transparent)">
@@ -3773,6 +3930,7 @@ function radarAlertBanner(r){
           <tbody>${radios.map(radioRow).join("")}</tbody>
         </table>
       </div>
+      ${i===0?statsBit:""}
     </div>`;
   }).join("");
 }
@@ -3824,7 +3982,7 @@ function renderBoard(){
     </form>
     <p class="subtle" style="font-size:12px">Live mode re-queries client stats/events, 7-day radio events, Teams/Zoom calls, and the dominant AP's occupancy. Auto-pauses on Mist 429. 3s is aggressive.</p>
     ${radarAlertBanner(r)}
-    ${clientRadarPanel(r)}
+    ${(r.radarAlerts||[]).length ? "" : clientRadarPanel(r)}
     <div class="card ${r.verdict.label==="Critical"||(r.radarAlerts||[]).length?"pulse-c":""}">
       <div class="${vt}" style="font-size:1.15rem;font-weight:650">${esc(r.verdict.label)} · score ${r.verdict.score}</div>
       <p>${esc(r.verdict.primaryCause)}</p>
@@ -3893,6 +4051,15 @@ function renderBoard(){
   document.querySelectorAll("#occFilters [data-occ]").forEach(btn=>{
     btn.onclick=()=>{ state.occFilter=btn.getAttribute("data-occ")||"all"; renderBoard(); };
   });
+  const btnFs=$("btnRadioFs");
+  if(btnFs){
+    btnFs.onclick=()=>{
+      state.radioFs=!state.radioFs;
+      document.body.classList.toggle("radio-fs-open", state.radioFs);
+      renderBoard();
+    };
+  }
+  document.body.classList.toggle("radio-fs-open", !!(state.radioFs && state.result));
 }
 </script>
 </body></html>
@@ -4297,7 +4464,7 @@ def self_test() -> None:
     demo_ids = [c["id"] for c in demo["verdict"]["correlations"]]
     assert any(i.startswith("radio-radar") for i in demo_ids), demo_ids
     assert any(c.get("highlight") for c in demo["verdict"]["correlations"]), demo["verdict"]["correlations"]
-    assert any(i.startswith("call-radar") or i.startswith("call-drop") for i in demo_ids), demo_ids
+    assert any(i.startswith("call-radar") for i in demo_ids), demo_ids
     assert any(e.get("highlight") for e in demo["radioEvents"]), demo["radioEvents"]
     assert any(c["teams"] for c in demo["calls"]), demo["calls"]
     assert client_ap_at(demo["sessions"], demo["events"], demo["stats"], demo["radioEvents"][0]["timestamp"] if False else None or 0) or True
@@ -4362,6 +4529,32 @@ def self_test() -> None:
     cc_two = call_correlations([teams_bad], [drop], sess_long, {"rssi": -81, "snr": 11}, [radar, radar_b])
     assert len([c for c in cc_two if c["id"].startswith("call-radar")]) == 2, cc_two
 
+    # Store path: Teams during a buried same-AP DFS hit — not dropped by neighbor storm.
+    storm = RadioEventStore({"0a0027aa1103"})
+    for i in range(2000):
+        storm.add(pick_rrm_event({
+            "timestamp": t0 - i, "ap": "0a0027aa11ff", "band": "5",
+            "event": "rrm-radar", "channel": 44, "pre_channel": 36,
+        }))
+    storm.add(radar)
+    cc_storm = call_correlations(
+        [teams_bad], [drop], sess_on, {"rssi": -81, "snr": 11},
+        storm.export_events(), None, storm,
+    )
+    assert [c for c in cc_storm if str(c["id"]).startswith("call-radar")], cc_storm
+    al_storm = radar_session_alerts(storm.export_events(), sess_on, [teams_bad], None, storm)
+    assert al_storm and al_storm[0].get("call") == "Microsoft Teams", al_storm
+    # Millisecond Teams timestamps must still overlap second-based radar.
+    teams_ms = pick_call({
+        "app": "teams", "mac": DEMO_MAC, "meeting_id": "m-ms",
+        "start_time": (t0 - 20) * 1000, "end_time": (t0 + 80) * 1000,
+        "audio_quality": 2, "video_quality": 3,
+    })
+    assert teams_ms["start"] == float(t0 - 20) and teams_ms["end"] == float(t0 + 80), teams_ms
+    cc_ms_call = call_correlations([teams_ms], [], sess_on, None, [radar])
+    assert any(c["id"].startswith("call-radar") for c in cc_ms_call), cc_ms_call
+    assert cc_ms_call[0]["detail"]["call"] == "Microsoft Teams", cc_ms_call[0]
+
     # AP-keyed store: buried client DFS among 2000 neighbor radars, BSSID alias.
     store = RadioEventStore({"0a0027aa1103"}, [{"0a0027aa1100", "0a0027aa1103"}])
     buried = pick_rrm_event({
@@ -4384,6 +4577,54 @@ def self_test() -> None:
     assert len(al_store) == 1, al_store
     rc_store = radio_event_correlations(exported, [], sess_b, None, None, store)
     assert len([c for c in rc_store if c["id"].startswith("radio-radar")]) == 1
+
+    # Overlapping duplicate sessions + one radar must not print two banners.
+    # This is the ISB05-AP16-A061 case: same association twice, connect 0.4s apart.
+    sess_dup = [
+        {"ap": "04cdc023a061", "apName": "ISB05-AP16-A061", "ssid": "Corporate_Wifi",
+         "band": "5", "connect": t0 - 10266, "disconnect": t0 + 1, "duration": 10267},
+        {"ap": "04cdc023a061", "apName": "ISB05-AP16-A061", "ssid": "Corporate_Wifi",
+         "band": "5", "connect": t0 - 10265.6, "disconnect": t0 + 1.2, "duration": 10266.8},
+    ]
+    radar_dup = pick_rrm_event({
+        "timestamp": t0, "ap": "04cdc023a061", "band": "5",
+        "event": "radar-detected", "channel": 149, "pre_channel": 56,
+        "bandwidth": 20, "pre_bandwidth": 20, "power": 6, "pre_power": 6,
+        "apName": "ISB05-AP16-A061",
+    })
+    store_dup = RadioEventStore({"04cdc023a061"})
+    store_dup.add(radar_dup)
+    store_dup.add(pick_rrm_event({
+        "timestamp": t0, "ap": "04cdc023a061", "band": "5",
+        "event": "radar-detected", "channel": 149, "pre_channel": 56,
+        "bandwidth": 20, "pre_bandwidth": 20, "power": 6, "pre_power": 6,
+        "apName": "ISB05-AP16-A061",
+    }))
+    al_dup = radar_session_alerts([radar_dup], sess_dup, [], None, store_dup)
+    assert len(al_dup) == 1, [(a.get("sessionConnect"), a.get("id")) for a in al_dup]
+    assert len(al_dup[0].get("radios") or []) == 1, al_dup[0].get("radios")
+    assert store_dup.client_radar_events(sess_dup).__len__() == 1
+    assert all(s.get("hitByRadar") for s in sess_dup), sess_dup
+    # Two distinct radars on the overlapping association → one banner, two radios.
+    store_dup.add(pick_rrm_event({
+        "timestamp": t0 - 90, "ap": "04cdc023a061", "band": "5",
+        "event": "rrm-radar", "channel": 100, "pre_channel": 56,
+        "apName": "ISB05-AP16-A061",
+    }))
+    al_two = radar_session_alerts(store_dup.export_events(), sess_dup, [], None, store_dup)
+    assert len(al_two) == 1, al_two
+    assert len(al_two[0]["radios"]) == 2, al_two[0]["radios"]
+    # Sequential non-overlapping sessions stay as separate banners.
+    sess_seq = [
+        {"ap": "04cdc023a061", "connect": t0 - 8000, "disconnect": t0 - 7000, "duration": 1000},
+        {"ap": "04cdc023a061", "connect": t0 - 2000, "disconnect": t0 - 1000, "duration": 1000},
+    ]
+    store_seq = RadioEventStore({"04cdc023a061"})
+    store_seq.add(pick_rrm_event({"timestamp": t0 - 7500, "ap": "04cdc023a061", "event": "radar-detected", "channel": 36}))
+    store_seq.add(pick_rrm_event({"timestamp": t0 - 1500, "ap": "04cdc023a061", "event": "radar-detected", "channel": 100}))
+    al_seq = radar_session_alerts(store_seq.export_events(), sess_seq, [], None, store_seq)
+    assert len(al_seq) == 2, al_seq
+    assert "function uniqueRadarAlerts" in PAGE
     slices = rrm_time_slices("1d", now=t0)
     assert len(slices) == 8, slices  # 24h / 3h
     assert slices[0][1] == t0 and slices[-1][0] == t0 - 86400
@@ -4392,6 +4633,15 @@ def self_test() -> None:
     assert "ranked.slice(0,60)" not in PAGE
     assert "function clientRadarPanel" in PAGE
     assert "Radar hits on this client's APs (0)" in PAGE
+    assert "if(alerts.length) return \"\"" in PAGE
+    assert '(r.radarAlerts||[]).length ? "" : clientRadarPanel(r)' in PAGE
+    assert "btnRadioFs" in PAGE
+    assert "radio-fs" in PAGE
+    assert "Exit full screen" in PAGE
+    assert "up to 60 seconds" in PAGE
+    assert "id=\"fetchHint\"" in PAGE
+    assert PAGE.find('id="btnDiag"') < PAGE.find('id="fetchHint"')
+    assert PAGE.find('id="btnConnect"') < PAGE.find('id="btnDiag"')
     demo2 = demo_result()
     assert demo2.get("clientRadarEvents"), demo2.get("clientRadarEvents")
     assert demo2.get("radioStoreStats", {}).get("clientHits", 0) >= 1

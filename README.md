@@ -2,11 +2,24 @@
 
 Client disconnect RCA for **Juniper Mist**. Paste an Observer (read-only) API token, pick a site and client MAC, and get a verdict that correlates RF, 802.11 reason codes, DHCP/DNS, Marvis, Radio Management occupancy, **7-day radio events (including Post radar / DFS)**, and **Microsoft Teams / Zoom calls**.
 
-**Latest: [v1.2](https://github.com/InterconnectedSystems/lilac-lilac-maple-ruby/releases/tag/v1.2)** — AP-keyed radar store so DFS hits are not lost under a site radar storm. Same-AP gating from v1.1 is unchanged.
+**Latest: [v1.2.1](https://github.com/InterconnectedSystems/lilac-lilac-maple-ruby/releases/tag/v1.2.1)** — one radar banner per DFS hit, radio-events full screen, diagnose fetch hint.
 
 Click **Run sample investigation** on the home page to walk the demo with no token. Sample data uses fictional `DEMO-AP-F2-*` names only.
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![Mist](https://img.shields.io/badge/Mist_API-GET_only-0B7A75) ![Token](https://img.shields.io/badge/Token-Observer_read--only-8FD0C4) ![Release](https://img.shields.io/badge/release-v1.2-8FD0C4)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![Mist](https://img.shields.io/badge/Mist_API-GET_only-0B7A75) ![Token](https://img.shields.io/badge/Token-Observer_read--only-8FD0C4) ![Release](https://img.shields.io/badge/release-v1.2.1-8FD0C4)
+
+---
+
+## What’s new in v1.2.1
+
+Bug fixes on the v1.2 radar store.
+
+| Fix | Why |
+|---|---|
+| **One radar banner** | Mist often returns the same association twice (connect times a fraction of a second apart). One DFS hit is now one **Alert · session on radar AP** card. |
+| **Radio events full screen** | Expand the 7-day table so every kept event is reachable. |
+| **Diagnose fetch hint** | A busy site (lots of devices and radio events) can take up to 60 seconds. |
+| **Teams timestamps** | Millisecond call start/end still overlap same-AP radar. |
 
 ---
 
@@ -48,7 +61,7 @@ Python `--self-test` covers a buried client DFS among 2,000 neighbor radars, BSS
 
 ---
 
-## Install and run (Python) — this is the v1.2 console
+## Install and run (Python) — this is the v1.2.1 console
 
 No pip packages. Windows, macOS, and Linux.
 
@@ -73,7 +86,7 @@ python3 mist_disconnect_console.py --self-test
 
 ## Install and run (web)
 
-The Vite / React tree in this repo is the published companion UI. **v1.2 radar store / session-alert work is in `mist_disconnect_console.py` and `src/lib/mist/radio.ts`.** Use the Python command above for the local RCA engine.
+The Vite / React tree in this repo is the published companion UI. **v1.2.1 engine and UI fixes are in `mist_disconnect_console.py` and `src/lib/mist/radio.ts`.** Use the Python command above for the local RCA engine.
 
 ```bash
 git clone https://github.com/InterconnectedSystems/lilac-lilac-maple-ruby.git
@@ -203,7 +216,7 @@ No configuration is written. The token stays in the browser tab and is never sto
 ## Repo layout
 
 ```
-mist_disconnect_console.py   v1.2 RCA engine (stdlib only) — start here
+mist_disconnect_console.py   v1.2.1 RCA engine (stdlib only) — start here
 src/lib/mist/radio.ts        published companion radar store (same rules)
 screenshots/                 sample investigation captures (fictional DEMO-AP-F2 names)
 src/                         published web companion

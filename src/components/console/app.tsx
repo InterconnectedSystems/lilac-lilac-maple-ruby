@@ -12,6 +12,8 @@ import {
   ArrowLeft,
   CheckCircle2,
   Loader2,
+  Maximize2,
+  Minimize2,
   Pause,
   Radio,
   Search,
@@ -514,10 +516,15 @@ function ScopeView({
             <option value="1w">1 week</option>
           </select>
         </Field>
-        <Button type="submit" disabled={busy || !siteId} className="w-full">
-          {busy ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />}
-          Diagnose
-        </Button>
+        <div className="grid gap-1.5">
+          <Button type="submit" disabled={busy || !siteId} className="w-full">
+            {busy ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />}
+            Diagnose
+          </Button>
+          <p id="fetchHint" className="text-xs text-muted">
+            If the site has a lot of devices and a lot of events, fetching can take up to 60 seconds.
+          </p>
+        </div>
       </div>
     </form>
   );
@@ -591,6 +598,7 @@ function BoardView({
       : result.verdict.label === "Degraded"
         ? "text-warn"
         : "text-good";
+  const radarAlerts = result.radarAlerts ?? [];
 
   return (
     <div className="grid min-w-0 gap-4 sm:gap-5">
@@ -688,13 +696,20 @@ function BoardView({
         </div>
       </div>
 
-      <RadarAlertBanner alerts={result.radarAlerts ?? []} />
-      <ClientRadarPanel events={result.clientRadarEvents ?? []} stats={result.radioStoreStats} />
+      {radarAlerts.length ? (
+        <RadarAlertBanner
+          alerts={radarAlerts}
+          stats={result.radioStoreStats}
+          clientHits={(result.clientRadarEvents ?? []).length}
+        />
+      ) : (
+        <ClientRadarPanel events={result.clientRadarEvents ?? []} stats={result.radioStoreStats} />
+      )}
 
       <div
         className={cn(
           "min-w-0 rounded-2xl border bg-surface p-4 sm:p-5",
-          result.verdict.label === "Critical" || (result.radarAlerts ?? []).length
+          result.verdict.label === "Critical" || radarAlerts.length
             ? "border-crit/50 metric-crit"
             : "border-border",
         )}
@@ -1142,11 +1157,35 @@ function RadioRow({ ev }: { ev: RadioEvent }) {
   );
 }
 
-function RadarAlertBanner({ alerts }: { alerts: RadarAlert[] }) {
-  if (!alerts.length) return null;
+function RadarAlertBanner({
+  alerts,
+  stats,
+  clientHits,
+}: {
+  alerts: RadarAlert[];
+  stats?: DiagnoseResult["radioStoreStats"];
+  clientHits?: number;
+}) {
+  const uniqAlerts = useMemo(() => {
+    const seen = new Set<string>();
+    const out: RadarAlert[] = [];
+    for (const a of alerts) {
+      const rt = a.radarTime ?? a.radio?.timestamp ?? "";
+      const k = `${a.id}|${a.sessionAp}|${Math.trunc(Number(a.sessionConnect) || 0)}|${rt}|${a.radarEvent ?? ""}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(a);
+    }
+    return out;
+  }, [alerts]);
+  if (!uniqAlerts.length) return null;
+  const statsBit =
+    stats?.scanned != null
+      ? `Scanned ${stats.scanned} site radio events · indexed ${stats.radars} DFS/Post radar · ${clientHits ?? 0} overlapped this MAC's session on the same AP.`
+      : "";
   return (
     <div className="grid gap-3">
-      {alerts.map((a) => {
+      {uniqAlerts.map((a, i) => {
         const radios = a.radios?.length ? a.radios : a.radio ? [a.radio] : [];
         return (
         <section
@@ -1204,12 +1243,13 @@ function RadarAlertBanner({ alerts }: { alerts: RadarAlert[] }) {
                 </tr>
               </thead>
               <tbody>
-                {radios.map((ev, i) => (
-                  <RadioRow key={`${ev.timestamp}-${ev.ap}-${i}`} ev={ev} />
+                {radios.map((ev, ri) => (
+                  <RadioRow key={`${ev.timestamp}-${ev.ap}-${ri}`} ev={ev} />
                 ))}
               </tbody>
             </table>
           </div>
+          {i === 0 && statsBit ? <p className="mt-3 text-xs text-muted">{statsBit}</p> : null}
         </section>
         );
       })}
@@ -1274,6 +1314,21 @@ function ClientRadarPanel({
 }
 
 function RadioEventsPanel({ result }: { result: DiagnoseResult }) {
+  const [full, setFull] = useState(false);
+  useEffect(() => {
+    if (!full) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFull(false);
+    };
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = prev;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [full]);
+
   const rows = result.radioEvents ?? [];
   if (result.radioEventsUnavailable && !rows.length) {
     return (
@@ -1306,15 +1361,35 @@ function RadioEventsPanel({ result }: { result: DiagnoseResult }) {
     return (b.timestamp || 0) - (a.timestamp || 0);
   });
   const hitN = rows.filter((e) => e.highlight).length;
-  return (
-    <section className="min-w-0 rounded-2xl border border-border bg-surface p-4 sm:p-5">
-      <h2 className="text-sm font-semibold uppercase tracking-wide text-subtle">Radio events ({ranked.length})</h2>
+  const inner = (
+    <>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <h2 className="text-sm font-semibold uppercase tracking-wide text-subtle">
+          Radio events ({ranked.length})
+        </h2>
+        <Button
+          type="button"
+          variant="secondary"
+          className="min-h-11 shrink-0 px-3"
+          aria-pressed={full}
+          onClick={() => setFull((v) => !v)}
+        >
+          {full ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}
+          {full ? "Exit full screen" : "Full screen"}
+        </Button>
+      </div>
       <p className="mt-1 text-xs text-muted">
         Same source as Mist Site → Radio Management → Radio Events (this lookback, all bands).{" "}
         <span className="text-crit">Post radar on the AP this client was connected to</span> is highlighted ({hitN}).
         Scroll the box — the full kept list is here. Client-AP radar is never dropped; site-wide noise is sampled.
+        {full ? " Esc exits full screen." : ""}
       </p>
-      <div className="mt-3 max-h-[min(32rem,65vh)] max-w-full overflow-auto">
+      <div
+        className={cn(
+          "mt-3 max-w-full overflow-auto",
+          full ? "min-h-0 flex-1" : "max-h-[min(32rem,65vh)]",
+        )}
+      >
         <table className="w-full min-w-[44rem] text-left text-sm">
           <thead className="sticky top-0 bg-surface">
             <tr className="text-[11px] uppercase tracking-wide text-subtle">
@@ -1334,6 +1409,25 @@ function RadioEventsPanel({ result }: { result: DiagnoseResult }) {
           </tbody>
         </table>
       </div>
+    </>
+  );
+  if (full) {
+    return (
+      <div
+        className="fixed inset-0 z-50 flex flex-col bg-bg p-3 sm:p-4"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Radio events full screen"
+      >
+        <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-surface p-4 sm:p-5">
+          {inner}
+        </section>
+      </div>
+    );
+  }
+  return (
+    <section className="min-w-0 rounded-2xl border border-border bg-surface p-4 sm:p-5">
+      {inner}
     </section>
   );
 }
