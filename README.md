@@ -12,7 +12,7 @@ Click **Run sample investigation** on the home page to walk the demo with no tok
 
 ## What’s new in v1.3.3
 
-**Download Python console** opens the GitHub zip in a new tab. The hosted site cannot save files in Edge (`Can't download — No permissions`). Unzip, then `python3 mist_disconnect_console.py`.
+**Download Python console** opens the GitHub zip in a new tab. Unzip, then `python3 mist_disconnect_console.py`.
 
 No engine change from v1.3.
 
@@ -20,7 +20,7 @@ No engine change from v1.3.
 
 ## What’s new in v1.3.2
 
-**Download Python console** saves a zip. Edge/Windows block raw `.py` downloads (“Can't download — No permissions”). Unzip, then `python3 mist_disconnect_console.py`.
+**Download Python console** saves a zip. Unzip, then `python3 mist_disconnect_console.py`.
 
 No engine change from v1.3.
 
@@ -28,7 +28,7 @@ No engine change from v1.3.
 
 ## What’s new in v1.3.1
 
-Companion landing (and Python intro) now name the full correlation set: occupancy, 7-day Radio Management events (DFS), and Teams/Zoom. Copy states this is RCA for troublesome client disconnects — not a Wi-Fi health score.
+Companion landing (and Python intro) now name the full correlation set: occupancy, 7-day Radio Management events (DFS), and Teams/Zoom. Copy states this is RCA for troublesome client disconnects — not a Wi-Fi health score. 
 
 No engine change from v1.3.
 
@@ -36,7 +36,7 @@ No engine change from v1.3.
 
 ## What’s new in v1.3
 
-Removed scoring mechanism as it was misleading — this app is meant to help provide RCA for troublesome client disconnect issues.
+Removed scoring mechanism as it was misleading — this app is meant to help provide RCA for troublesome client disconnect issues.   The app is meant to help investigations of troublesome wireless clients by doing causative correlative analysis of data from a single client.
 
 No 0–100 number, no Healthy / Degraded / Critical. The board leads with the **RCA finding** (primary cause + evidence). Same-AP DFS still gets the **Alert · session on radar AP** banner. Correlations are unchanged.
 
