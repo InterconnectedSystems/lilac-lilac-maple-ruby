@@ -408,12 +408,27 @@ function ConnectView({
           <Button type="button" variant="secondary" onClick={onDemo} className="w-full sm:w-auto">
             Run sample investigation
           </Button>
-          <Button variant="ghost" asChild className="w-full sm:w-auto">
-            <a href="/mist_disconnect_console.py" download="mist_disconnect_console.py">
-              <Download className="size-4" />
-              Download Python console
-            </a>
-          </Button>
+          <div className="grid gap-1.5">
+            <Button variant="ghost" asChild className="w-full sm:w-auto">
+              <a href="/mist_disconnect_console.zip" download="mist_disconnect_console.zip">
+                <Download className="size-4" />
+                Download Python console
+              </a>
+            </Button>
+            <p className="text-xs text-muted">
+              Saves a zip (browsers block raw <span className="font-mono">.py</span> downloads). Unzip, then{" "}
+              <span className="font-mono">python3 mist_disconnect_console.py</span>
+              {" · "}
+              <a
+                className="underline underline-offset-2 hover:text-fg"
+                href="https://github.com/InterconnectedSystems/lilac-lilac-maple-ruby/blob/main/mist_disconnect_console.py"
+                target="_blank"
+                rel="noreferrer"
+              >
+                view on GitHub
+              </a>
+            </p>
+          </div>
         </div>
       </form>
 
