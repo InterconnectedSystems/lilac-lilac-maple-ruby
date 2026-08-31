@@ -21,7 +21,7 @@ export const Route = createRootRoute({
       { name: "format-detection", content: "telephone=no" },
       {
         name: "description",
-        content: "Juniper Mist client disconnect troubleshooter — RF, events, sessions, Marvis.",
+        content: "Juniper Mist client disconnect RCA — RF, reason codes, occupancy, 7-day radio events (DFS), Teams/Zoom. Not a Wi-Fi health score.",
       },
     ],
     links: [

@@ -367,7 +367,10 @@ function ConnectView({
       >
         <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">Client disconnect RCA</h1>
         <p className="mt-2 text-sm text-muted">
-          Investigate why a station drops: RF, 802.11 reason codes, DHCP after roam, and Marvis — without dumping the whole site.
+          Investigate why a station drops: RF, 802.11 reason codes, DHCP after roam, Marvis, occupancy, 7-day radio events (DFS), and Teams/Zoom — without dumping the whole site.
+        </p>
+        <p className="mt-2 text-sm text-muted">
+          This is RCA for troublesome client disconnects — not a Wi-Fi health score.
         </p>
         <div className="mt-5 grid gap-4">
           <Field label="API region">
@@ -441,6 +444,9 @@ function ConnectView({
             <li>RSSI/SNR vs deauth reason (coverage vs idle vs handshake).</li>
             <li>DHCP/DNS failures in the 2 minutes after a roam or assoc (L3 after join).</li>
             <li>AP ping-pong, 5→2.4 band drops, short sessions, TX retries.</li>
+            <li>Serving-AP channel occupancy: Site APs vs External APs vs Non-Wi-Fi (RRM scan).</li>
+            <li>7 days of Radio Management events (DFS radar, channel/power change) vs this client's disconnects.</li>
+            <li>Microsoft Teams / Zoom call quality overlapping those drops (when Mist has call stats).</li>
           </ul>
         </section>
       </aside>

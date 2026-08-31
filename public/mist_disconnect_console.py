@@ -3371,7 +3371,8 @@ body.radio-fs-open { overflow:hidden; }
   <section id="viewConnect" class="grid2">
     <form class="card stack" id="formConnect">
       <h1>Client disconnect RCA</h1>
-      <p class="muted">Investigate why a station drops: RF, 802.11 reason codes, DHCP after roam, and Marvis — without dumping the whole site.</p>
+      <p class="muted">Investigate why a station drops: RF, 802.11 reason codes, DHCP after roam, Marvis, occupancy, 7-day radio events (DFS), and Teams/Zoom — without dumping the whole site.</p>
+      <p class="muted">This is RCA for troublesome client disconnects — not a Wi-Fi health score.</p>
       <label><span>API region</span>
         <select id="host"></select>
       </label>
