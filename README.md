@@ -2,7 +2,7 @@
 
 Client disconnect RCA for **Juniper Mist**. Paste an Observer (read-only) API token, pick a site and client MAC, and get a verdict that correlates RF, 802.11 reason codes, DHCP/DNS, Marvis, Radio Management occupancy, **7-day radio events (including Post radar / DFS)**, and **Microsoft Teams / Zoom calls**.
 
-**Latest: [v1.3.3](https://github.com/InterconnectedSystems/lilac-lilac-maple-ruby/releases/tag/v1.3.3)** — scoring removed; companion “Download Python console” opens the GitHub zip (Edge cannot save files from this host).
+**Latest: [v1.3.3](https://github.com/InterconnectedSystems/lilac-lilac-maple-ruby/releases/tag/v1.3.3)** — scoring removed; companion “Download Python console” opens the GitHub zip.
 
 Click **Run sample investigation** on the home page to walk the demo with no token. Sample data uses fictional `DEMO-AP-F2-*` names only.
 
