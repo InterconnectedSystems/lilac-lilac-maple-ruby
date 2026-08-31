@@ -8,31 +8,8 @@ Click **Run sample investigation** on the home page to walk the demo with no tok
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![Mist](https://img.shields.io/badge/Mist_API-GET_only-0B7A75) ![Token](https://img.shields.io/badge/Token-Observer_read--only-8FD0C4) ![Release](https://img.shields.io/badge/release-v1.3.3-8FD0C4)
 
----
 
-## What’s new in v1.3.3
 
-**Download Python console** opens the GitHub zip in a new tab. Unzip, then `python3 mist_disconnect_console.py`.
-
-No engine change from v1.3.
-
----
-
-## What’s new in v1.3.2
-
-**Download Python console** saves a zip. Unzip, then `python3 mist_disconnect_console.py`.
-
-No engine change from v1.3.
-
----
-
-## What’s new in v1.3.1
-
-Companion landing (and Python intro) now name the full correlation set: occupancy, 7-day Radio Management events (DFS), and Teams/Zoom. Copy states this is RCA for troublesome client disconnects — not a Wi-Fi health score. 
-
-No engine change from v1.3.
-
----
 
 ## What’s new in v1.3
 
