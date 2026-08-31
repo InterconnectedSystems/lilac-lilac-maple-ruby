@@ -129,7 +129,6 @@ export function buildVerdict(
   radioStore: RadioEventStore | null = null,
 ): HealthVerdict {
   const notes: string[] = [];
-  let score = 100;
   const correlations = [
     ...buildCorrelations(stats, events, sessions),
     ...rfOccupancyCorrelations(apRadio, stats),
@@ -143,18 +142,14 @@ export function buildVerdict(
   const sb = snrBand(snr);
 
   if (rb === "crit") {
-    score -= 25;
     notes.push(`RSSI ${rssi} dBm is critically weak — coverage or obstruction.`);
   } else if (rb === "warn") {
-    score -= 12;
     notes.push(`RSSI ${rssi} dBm is marginal (target ≥ −65 dBm).`);
   }
 
   if (sb === "crit") {
-    score -= 20;
     notes.push(`SNR ${snr} dB is critically low — noise or interference likely.`);
   } else if (sb === "warn") {
-    score -= 10;
     notes.push(`SNR ${snr} dB is only fair (target ≥ 25 dB).`);
   }
 
@@ -169,7 +164,6 @@ export function buildVerdict(
   const roam = events.filter((e) => /ROAM/i.test(e.type));
 
   if (deauth.length) {
-    score -= Math.min(30, deauth.length * 6);
     const reasons = [
       ...new Set(
         deauth
@@ -182,46 +176,38 @@ export function buildVerdict(
     );
   }
   if (dhcp.length) {
-    score -= 15;
     notes.push(`${dhcp.length} DHCP failure(s) after association — L3 / gateway.`);
   }
   if (auth.length) {
-    score -= 15;
     notes.push(`${auth.length} authentication/association failure(s).`);
   }
   if (roam.length >= 4) {
-    score -= 8;
     notes.push(`${roam.length} roam events in the window — sticky client or coverage holes.`);
   }
 
   const short = sessions.filter((s) => s.duration != null && s.duration > 0 && s.duration < 60);
   if (short.length >= 2) {
-    score -= 10;
     notes.push(`${short.length} sessions lasted under 60s — unstable association.`);
   }
 
   const retries = stats?.txRetries ?? null;
   if (retries != null && retries >= 80) {
-    score -= 8;
     notes.push(`${retries} TX retries — airtime contention or a dirty channel.`);
   }
 
   const serving = apRadio?.channels.find((c) => c.serving);
   const nw = serving?.nonWifi ?? apRadio?.radio?.utilNonWifi ?? 0;
   if (nw >= 25) {
-    score -= nw >= 40 ? 10 : 6;
     const ch = serving?.channel ?? apRadio?.radio?.channel;
     notes.push(`Serving AP channel ${ch} has ${nw}% non-Wi-Fi occupancy.`);
   }
 
   const radioHits = correlations.filter((c) => c.id.startsWith("radio-") && c.severity === "crit");
   if (radioHits.length) {
-    score -= Math.min(18, 8 + 4 * radioHits.length);
     notes.push(`${radioHits.length} Radio Management event(s) on the AP this client was connected to.`);
   }
   const callHits = correlations.filter((c) => c.id.startsWith("call-") && (c.severity === "crit" || c.severity === "warn"));
   if (callHits.length) {
-    score -= Math.min(16, 6 + 3 * callHits.length);
     notes.push(`${callHits.length} Teams/collaboration call issue(s) overlapping wireless events.`);
   }
 
@@ -249,10 +235,6 @@ export function buildVerdict(
     }
   }
 
-  score = Math.max(0, Math.min(100, score));
-  const label: HealthVerdict["label"] =
-    score >= 80 ? "Healthy" : score >= 50 ? "Degraded" : "Critical";
-
   let primaryCause = "No dominant failure signature — review the timeline.";
   const top = correlations[0];
   if (top && (top.severity === "crit" || top.severity === "warn")) {
@@ -269,5 +251,5 @@ export function buildVerdict(
 
   if (!notes.length) notes.push("RF metrics in range and no clustered failure events.");
 
-  return { score, label, primaryCause, notes, correlations };
+  return { primaryCause, notes, correlations };
 }

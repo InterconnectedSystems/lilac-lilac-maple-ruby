@@ -2,11 +2,19 @@
 
 Client disconnect RCA for **Juniper Mist**. Paste an Observer (read-only) API token, pick a site and client MAC, and get a verdict that correlates RF, 802.11 reason codes, DHCP/DNS, Marvis, Radio Management occupancy, **7-day radio events (including Post radar / DFS)**, and **Microsoft Teams / Zoom calls**.
 
-**Latest: [v1.2.2](https://github.com/InterconnectedSystems/lilac-lilac-maple-ruby/releases/tag/v1.2.2)** — lockfile sync so a clean install can publish.
+**Latest: [v1.3](https://github.com/InterconnectedSystems/lilac-lilac-maple-ruby/releases/tag/v1.3)** — scoring removed; this is a disconnect RCA console.
 
 Click **Run sample investigation** on the home page to walk the demo with no token. Sample data uses fictional `DEMO-AP-F2-*` names only.
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![Mist](https://img.shields.io/badge/Mist_API-GET_only-0B7A75) ![Token](https://img.shields.io/badge/Token-Observer_read--only-8FD0C4) ![Release](https://img.shields.io/badge/release-v1.2.2-8FD0C4)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![Mist](https://img.shields.io/badge/Mist_API-GET_only-0B7A75) ![Token](https://img.shields.io/badge/Token-Observer_read--only-8FD0C4) ![Release](https://img.shields.io/badge/release-v1.3-8FD0C4)
+
+---
+
+## What’s new in v1.3
+
+Removed scoring mechanism as it was misleading — this app is meant to help provide RCA for troublesome client disconnect issues.
+
+No 0–100 number, no Healthy / Degraded / Critical. The board leads with the **RCA finding** (primary cause + evidence). Same-AP DFS still gets the **Alert · session on radar AP** banner. Correlations are unchanged.
 
 ---
 
@@ -71,7 +79,7 @@ Python `--self-test` covers a buried client DFS among 2,000 neighbor radars, BSS
 
 ---
 
-## Install and run (Python) — this is the v1.2.1 console
+## Install and run (Python) — this is the v1.3 console
 
 No pip packages. Windows, macOS, and Linux.
 
@@ -96,7 +104,7 @@ python3 mist_disconnect_console.py --self-test
 
 ## Install and run (web)
 
-The Vite / React tree in this repo is the published companion UI. **v1.2.1 engine and UI fixes are in `mist_disconnect_console.py` and `src/lib/mist/radio.ts`.** Use the Python command above for the local RCA engine.
+The Vite / React tree in this repo is the published companion UI. **v1.3 engine and UI (no health score) are in `mist_disconnect_console.py` and `src/lib/mist/classify.ts`.** Use the Python command above for the local RCA engine.
 
 ```bash
 git clone https://github.com/InterconnectedSystems/lilac-lilac-maple-ruby.git
@@ -123,11 +131,11 @@ The console only issues **GET** requests. Use an Observer / read-only token from
 
 The banner is the first thing on the board when a session was on the radar AP.
 
-![Sample investigation: DFS session alert, Critical verdict, correlated causes](screenshots/09-live.png)
+![Sample investigation: DFS session alert, RCA finding, correlated causes](screenshots/09-live.png)
 
 | Verdict | Phone fold |
 |---|---|
-| ![Critical score — Post radar on the AP this client was connected to](screenshots/03-verdict.png) | ![Mobile board](screenshots/12-board-mobile-fold.png) |
+| ![RCA finding — Post radar on the AP this client was connected to](screenshots/03-verdict.png) | ![Mobile board](screenshots/12-board-mobile-fold.png) |
 
 ### Correlated causes
 
@@ -167,7 +175,7 @@ Same stacked histogram Mist shows under **Site → Radio Management → Current 
 2. **Scope** — Pick org, site, client MAC, and lookback (`1h` / `6h` / `1d` / `1w`).
 3. **Diagnose** — Per-MAC stats, events, **all sessions** (paginated), Marvis, AP inventory, occupancy, **RRM events by band** (time-sliced), Teams/Zoom calls.
 4. **Alert** — If a session covered a Post radar / radar-detected event **on that same AP**, the banner shows that session and that radio row.
-5. **Verdict** — Score + primary cause + same-AP radar / Teams correlations.
+5. **RCA finding** — Primary cause + evidence notes + same-AP radar / Teams correlations. No health score.
 6. **Live monitor** — Re-query stats/events plus the newest hour of radio events. Auto-pauses on Mist HTTP 429.
 
 ---
@@ -226,7 +234,7 @@ No configuration is written. The token stays in the browser tab and is never sto
 ## Repo layout
 
 ```
-mist_disconnect_console.py   v1.2.1 RCA engine (stdlib only) — start here
+mist_disconnect_console.py   v1.3 RCA engine (stdlib only) — start here
 src/lib/mist/radio.ts        published companion radar store (same rules)
 screenshots/                 sample investigation captures (fictional DEMO-AP-F2 names)
 src/                         published web companion

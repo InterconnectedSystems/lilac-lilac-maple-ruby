@@ -154,8 +154,6 @@ export type Correlation = {
 };
 
 export type HealthVerdict = {
-  score: number;
-  label: "Healthy" | "Degraded" | "Critical";
   primaryCause: string;
   notes: string[];
   correlations: Correlation[];

@@ -10,7 +10,7 @@ import {
   Activity,
   AlertTriangle,
   ArrowLeft,
-  CheckCircle2,
+  Download,
   Loader2,
   Maximize2,
   Minimize2,
@@ -405,6 +405,12 @@ function ConnectView({
           <Button type="button" variant="secondary" onClick={onDemo} className="w-full sm:w-auto">
             Run sample investigation
           </Button>
+          <Button variant="ghost" asChild className="w-full sm:w-auto">
+            <a href="/mist_disconnect_console.py" download="mist_disconnect_console.py">
+              <Download className="size-4" />
+              Download Python console
+            </a>
+          </Button>
         </div>
       </form>
 
@@ -592,13 +598,16 @@ function BoardView({
     () => result.events.filter((e) => /DEAUTH|DISASSOC|DISCONNECT/i.test(e.type)).length,
     [result.events],
   );
-  const verdictTone =
-    result.verdict.label === "Critical"
-      ? "text-crit"
-      : result.verdict.label === "Degraded"
-        ? "text-warn"
-        : "text-good";
   const radarAlerts = result.radarAlerts ?? [];
+  const topCorr = result.verdict.correlations[0];
+  const rcaSev: "crit" | "warn" | "info" =
+    radarAlerts.length || topCorr?.severity === "crit"
+      ? "crit"
+      : topCorr?.severity === "warn"
+        ? "warn"
+        : "info";
+  const rcaTone =
+    rcaSev === "crit" ? "text-crit" : rcaSev === "warn" ? "text-warn" : "text-muted";
 
   return (
     <div className="grid min-w-0 gap-4 sm:gap-5">
@@ -709,22 +718,20 @@ function BoardView({
       <div
         className={cn(
           "min-w-0 rounded-2xl border bg-surface p-4 sm:p-5",
-          result.verdict.label === "Critical" || radarAlerts.length
+          rcaSev === "crit" || radarAlerts.length
             ? "border-crit/50 metric-crit"
             : "border-border",
         )}
       >
-        <div className="flex flex-wrap items-center gap-3">
-          {result.verdict.label === "Healthy" ? (
-            <CheckCircle2 className="size-5 text-good" />
+        <p className="text-xs font-semibold uppercase tracking-wide text-subtle">RCA finding</p>
+        <div className="mt-2 flex flex-wrap items-start gap-3">
+          {rcaSev === "info" ? (
+            <Search className="mt-0.5 size-5 text-muted" />
           ) : (
-            <AlertTriangle className={cn("size-5", verdictTone)} />
+            <AlertTriangle className={cn("mt-0.5 size-5 shrink-0", rcaTone)} />
           )}
-          <p className={cn("text-lg font-semibold", verdictTone)}>
-            {result.verdict.label} · score {result.verdict.score}
-          </p>
+          <p className={cn("text-lg font-semibold", rcaTone)}>{result.verdict.primaryCause}</p>
         </div>
-        <p className="mt-2 text-sm">{result.verdict.primaryCause}</p>
         <ul className="mt-3 grid gap-1 text-sm text-muted">
           {result.verdict.notes.map((n) => (
             <li key={n}>— {n}</li>

@@ -153,7 +153,13 @@ export default defineConfig(async ({ command, isPreview }) => {
       ...(appEnv ? [appEnv] : []),
       ...(grokPwa ? [grokPwa] : []),
       tailwindcss(),
-      tanstackStart(),
+      tanstackStart({
+        prerender: {
+          enabled: true,
+          crawlLinks: false,
+          failOnError: true,
+        },
+      }),
       ...(command === "build" || isPreview
         ? [
             nitro({

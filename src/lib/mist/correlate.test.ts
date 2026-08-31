@@ -61,8 +61,10 @@ test("weak RSSI+SNR plus DHCP after assoc correlates as coverage and L3", () => 
   assert.ok(keys.includes("handshake"), keys.join(","));
   assert.ok(keys.includes("sticky-idle"), keys.join(","));
   const v = buildVerdict(baseStats, events, []);
-  assert.equal(v.label, "Critical");
   assert.ok(v.correlations.length >= 2);
+  assert.notEqual(v.primaryCause, "No dominant failure signature — review the timeline.");
+  assert.equal("score" in v, false);
+  assert.equal("label" in v, false);
 });
 
 test("SNR collapse with decent RSSI is tagged as noise, not coverage", () => {
@@ -73,7 +75,9 @@ test("SNR collapse with decent RSSI is tagged as noise, not coverage", () => {
 test("healthy empty window has no correlations", () => {
   const v = buildVerdict(null, [], []);
   assert.deepEqual(v.correlations, []);
-  assert.equal(v.label, "Healthy");
+  assert.equal(v.primaryCause, "No dominant failure signature — review the timeline.");
+  assert.equal("score" in v, false);
+  assert.equal("label" in v, false);
 });
 
 test("successful association is not a negative/auth failure", () => {
@@ -378,4 +382,28 @@ test("overlapping duplicate sessions do not print two radar banners", async () =
   storeSeq.add(pickRrmEvent({ timestamp: t - 7500, ap: "04cdc023a061", event: "radar-detected", channel: 36 }));
   storeSeq.add(pickRrmEvent({ timestamp: t - 1500, ap: "04cdc023a061", event: "radar-detected", channel: 100 }));
   assert.equal(radarSessionAlerts(storeSeq.exportEvents(), seq, [], null, storeSeq).length, 2);
+});
+
+test("verdict has no health score or Healthy/Degraded/Critical label", async () => {
+  const empty = buildVerdict(null, [], []);
+  assert.equal("score" in empty, false);
+  assert.equal("label" in empty, false);
+  assert.equal(empty.primaryCause, "No dominant failure signature — review the timeline.");
+
+  const noisy = buildVerdict(baseStats, [
+    ev({ timestamp: 1_000_000, type: "CLIENT_DEAUTHENTICATION", text: "idle", reason: 4 }),
+  ], []);
+  assert.equal("score" in noisy, false);
+  assert.equal("label" in noisy, false);
+  assert.ok(noisy.primaryCause.length > 0);
+
+  const { buildDemoResult } = await import("./demo-data.ts");
+  const demo = buildDemoResult();
+  assert.equal("score" in demo.verdict, false);
+  assert.equal("label" in demo.verdict, false);
+  assert.notEqual(demo.verdict.primaryCause, "No dominant failure signature — review the timeline.");
+  assert.ok(demo.verdict.notes.length >= 1);
+  const blob = JSON.stringify(demo.verdict);
+  assert.equal(/"score"\s*:/.test(blob), false, blob.slice(0, 200));
+  assert.equal(/"label"\s*:/.test(blob), false, blob.slice(0, 200));
 });
