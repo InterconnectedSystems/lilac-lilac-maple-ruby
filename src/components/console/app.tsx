@@ -410,13 +410,17 @@ function ConnectView({
           </Button>
           <div className="grid gap-1.5">
             <Button variant="ghost" asChild className="w-full sm:w-auto">
-              <a href="/mist_disconnect_console.zip" download="mist_disconnect_console.zip">
+              <a
+                href="https://github.com/InterconnectedSystems/lilac-lilac-maple-ruby/releases/latest/download/mist_disconnect_console.zip"
+                target="_blank"
+                rel="noreferrer"
+              >
                 <Download className="size-4" />
                 Download Python console
               </a>
             </Button>
             <p className="text-xs text-muted">
-              Saves a zip (browsers block raw <span className="font-mono">.py</span> downloads). Unzip, then{" "}
+              Opens the GitHub zip in a new tab (this host cannot save files in Edge). Unzip, then{" "}
               <span className="font-mono">python3 mist_disconnect_console.py</span>
               {" · "}
               <a
@@ -425,7 +429,7 @@ function ConnectView({
                 target="_blank"
                 rel="noreferrer"
               >
-                view on GitHub
+                view source
               </a>
             </p>
           </div>
